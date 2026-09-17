@@ -4,7 +4,7 @@ export const DEFAULT_API_URL = "https://api.reintersect.com";
 
 export const CLIENT_NAME = "Reintersect for coding agents";
 
-export const CLIENT_VERSION = "0.1.0";
+export const CLIENT_VERSION = process.env.CLIENT_VERSION ?? "0.0.0";
 
 export const LOOPBACK_PORTS = [41893, 41894, 41895] as const;
 

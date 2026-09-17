@@ -146,9 +146,13 @@ The plugin never writes to `CLAUDE.md`, `AGENTS.md` or any host settings file. H
 
 ## Development
 
-`packages/cli/src` is the only source: a TypeScript CLI on Effect, bundled by `tsdown` into one dependency-free `dist/reintersect-agent.mjs` that `scripts/build.ts` copies into every plugin directory along with the skills rendered from `skills/`. The per-plugin `dist/` is committed, because hosts install plugins as plain git checkouts with no install step. `packages/opencode` is the npm package for OpenCode; its `dist/` is built at publish time with `pnpm build && npm publish packages/opencode`.
+`packages/cli/src` is the only source: a TypeScript CLI on Effect, bundled by `tsdown` into one dependency-free `dist/reintersect-agent.mjs` that `scripts/build.ts` copies into every plugin directory along with the skills rendered from `skills/`. The per-plugin `dist/` is committed, because hosts install plugins as plain git checkouts with no install step. `packages/opencode` is the npm package for OpenCode; the release builds its `dist/` before publishing.
 
-`pnpm install`, then `pnpm check` runs everything CI runs. To try a local build, run `claude --plugin-dir plugins/claude-code`, or copy `plugins/cursor` into `~/.cursor/plugins/local/reintersect`.
+The root `package.json` `version` is the one version. `pnpm build` stamps it into every plugin and marketplace manifest (rendered from the `*.json.tmpl` beside each), into `packages/*/package.json`, and into the bundle as the version the CLI announces. `pnpm install`, then `pnpm check` runs lint, typecheck, tests and the build, and fails when any committed bundle, skill or stamped file drifts from the source. CI runs it on every pull request and push to `main`.
+
+To release, run the Release workflow in GitHub Actions and pick `patch`, `minor` or `major`. It bumps the version, builds, checks, commits `chore(release): vX.Y.Z` to `main`, tags it, publishes `@reintersect/opencode` through npm trusted publishing and creates the GitHub release. Pushing a `vX.Y.Z` tag by hand runs the same workflow with that version, whatever `main` says at the time.
+
+To try a local build, run `claude --plugin-dir plugins/claude-code`, or copy `plugins/cursor` into `~/.cursor/plugins/local/reintersect`.
 
 ## License
 

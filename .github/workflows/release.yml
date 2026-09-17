@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver bump for the next release
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve the version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - id: resolve
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(npm version "$BUMP" --no-git-tag-version)"
+            version="${version#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Release v${{ needs.version.outputs.version }}
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Pin npm for trusted publishing
+        run: npm install --global npm@11
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set the version
+        run: npm pkg set version="$VERSION"
+
+      - run: pnpm build
+
+      - run: pnpm check
+
+      - name: Validate the Claude Code plugin
+        run: npx --yes @anthropic-ai/claude-code@latest plugin validate --strict plugins/claude-code
+
+      - name: Commit and push when anything changed
+        run: |
+          git add package.json packages plugins .claude-plugin .cursor-plugin
+          if git diff --cached --quiet; then
+            echo "main is already at v$VERSION"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(release): v$VERSION"
+          git push origin HEAD:main
+
+      - name: Tag unless the tag exists
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION is already tagged"
+            exit 0
+          fi
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Publish @reintersect/opencode unless the version is on npm
+        working-directory: packages/opencode
+        run: |
+          if [ "$(npm view "@reintersect/opencode@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "@reintersect/opencode@$VERSION is already on npm"
+            exit 0
+          fi
+          npm publish
+
+      - name: Create the GitHub release unless it exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "v$VERSION" >/dev/null 2>&1 || gh release create "v$VERSION" --verify-tag --generate-notes

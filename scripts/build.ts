@@ -13,6 +13,19 @@ const PLUGIN_ROOTS: Record<string, string> = {
 
 const OPENCODE_DIST = join(ROOT, "packages", "opencode", "dist");
 
+const STAMPED = [
+  ".claude-plugin/marketplace.json",
+  ".cursor-plugin/marketplace.json",
+  "plugins/claude-code/.claude-plugin/plugin.json",
+  "plugins/claude-code/.codex-plugin/plugin.json",
+  "plugins/cursor/.cursor-plugin/plugin.json",
+];
+
+const PACKAGES = ["packages/cli/package.json", "packages/opencode/package.json"];
+
+const stampVersion = (packageJson: string, version: string) =>
+  packageJson.replace(/"version": "[^"]*"/, `"version": "${version}"`);
+
 const render = (template: string, pluginRoot: string) =>
   template.replaceAll("{{PLUGIN_ROOT}}", pluginRoot).replaceAll("{{PREFIX}}", "/reintersect:");
 
@@ -46,9 +59,29 @@ const run = async (check: boolean) => {
   const skillNames = (await readdir(SKILLS, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name);
+  const { version } = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as {
+    version: string;
+  };
+  const stamped = [
+    ...STAMPED.map(async (path) =>
+      emit(
+        join(ROOT, path),
+        (await readFile(join(ROOT, `${path}.tmpl`), "utf8")).replaceAll("{{VERSION}}", version),
+        check,
+      ),
+    ),
+    ...PACKAGES.map(async (path) =>
+      emit(
+        join(ROOT, path),
+        stampVersion(await readFile(join(ROOT, path), "utf8"), version),
+        check,
+      ),
+    ),
+  ];
   const stale = (
-    await Promise.all(
-      Object.entries(PLUGIN_ROOTS).map(async ([directory, pluginRoot]) => {
+    await Promise.all([
+      ...stamped,
+      ...Object.entries(PLUGIN_ROOTS).map(async ([directory, pluginRoot]) => {
         const pluginDir = join(ROOT, "plugins", directory);
         const outputs = [
           emit(join(pluginDir, "dist", "reintersect-agent.mjs"), bundle, check),
@@ -63,7 +96,7 @@ const run = async (check: boolean) => {
 
         return Promise.all(outputs);
       }),
-    )
+    ])
   )
     .flat()
     .filter((path): path is string => path !== undefined);
@@ -90,7 +123,7 @@ const run = async (check: boolean) => {
 
   process.stdout.write(
     check
-      ? "plugins/* match a fresh build\n"
+      ? "committed outputs match a fresh build\n"
       : `wrote ${Object.keys(PLUGIN_ROOTS).length} plugin bundles, ${Object.keys(PLUGIN_ROOTS).length * skillNames.length} skills and the OpenCode package\n`,
   );
 };

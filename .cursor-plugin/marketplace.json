@@ -1,0 +1,19 @@
+{
+  "name": "reintersect",
+  "owner": {
+    "name": "Reintersect",
+    "email": "support@reintersect.com"
+  },
+  "metadata": {
+    "description": "Reintersect plugins for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "reintersect",
+      "source": "plugins/cursor",
+      "description": "Reintersect for your coding agent.",
+      "version": "0.1.0",
+      "displayName": "Reintersect"
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+diff --git a/dist/dts/McpSchema.d.ts b/dist/dts/McpSchema.d.ts
+index de920d2337c2dfec684c9f777704db7d50b03309..9d6372d2b93482e59a4e92da16160c98330e3feb 100644
+--- a/dist/dts/McpSchema.d.ts
++++ b/dist/dts/McpSchema.d.ts
+@@ -180,6 +180,14 @@ declare const Implementation_base: Schema.Struct<{
+     name: typeof Schema.String;
+     title: Schema.optional<typeof Schema.String>;
+     version: typeof Schema.String;
++    description: Schema.optional<typeof Schema.String>;
++    websiteUrl: Schema.optional<typeof Schema.String>;
++    icons: Schema.optional<Schema.Array$<Schema.Struct<{
++        src: typeof Schema.String;
++        mimeType: Schema.optional<typeof Schema.String>;
++        sizes: Schema.optional<Schema.Array$<typeof Schema.String>>;
++        theme: Schema.optional<Schema.Literal<["light", "dark"]>>;
++    }>>>;
+ }>;
+ /**
+  * Describes the name and version of an MCP implementation.
+@@ -1536,10 +1544,18 @@ declare const Tool_base: Schema.Class<Tool, {
+      * A JSON Schema object defining the expected parameters for the tool.
+      */
+     inputSchema: typeof Schema.Unknown;
++    outputSchema: Schema.optional<typeof Schema.Unknown>;
+     /**
+      * Optional additional tool information.
+      */
+     annotations: Schema.optional<typeof ToolAnnotations>;
++    icons: Schema.optional<Schema.Array$<Schema.Struct<{
++        src: typeof Schema.String;
++        mimeType: Schema.optional<typeof Schema.String>;
++        sizes: Schema.optional<Schema.Array$<typeof Schema.String>>;
++        theme: Schema.optional<Schema.Literal<["light", "dark"]>>;
++    }>>>;
++    _meta: Schema.optional<Schema.Record$<typeof Schema.String, typeof Schema.Unknown>>;
+ }, Schema.Struct.Encoded<{
+     /**
+      * The name of the tool.
+@@ -1556,10 +1572,18 @@ declare const Tool_base: Schema.Class<Tool, {
+      * A JSON Schema object defining the expected parameters for the tool.
+      */
+     inputSchema: typeof Schema.Unknown;
++    outputSchema: Schema.optional<typeof Schema.Unknown>;
+     /**
+      * Optional additional tool information.
+      */
+     annotations: Schema.optional<typeof ToolAnnotations>;
++    icons: Schema.optional<Schema.Array$<Schema.Struct<{
++        src: typeof Schema.String;
++        mimeType: Schema.optional<typeof Schema.String>;
++        sizes: Schema.optional<Schema.Array$<typeof Schema.String>>;
++        theme: Schema.optional<Schema.Literal<["light", "dark"]>>;
++    }>>>;
++    _meta: Schema.optional<Schema.Record$<typeof Schema.String, typeof Schema.Unknown>>;
+ }>, never, {
+     readonly annotations?: ToolAnnotations | undefined;
+ } & {
+@@ -1570,6 +1594,19 @@ declare const Tool_base: Schema.Class<Tool, {
+     readonly title?: string | undefined;
+ } & {
+     readonly inputSchema: unknown;
++} & {
++    readonly outputSchema?: unknown;
++} & {
++    readonly icons?: ReadonlyArray<{
++        readonly src: string;
++        readonly mimeType?: string | undefined;
++        readonly sizes?: ReadonlyArray<string> | undefined;
++        readonly theme?: "light" | "dark" | undefined;
++    }> | undefined;
++} & {
++    readonly _meta?: {
++        readonly [x: string]: unknown;
++    } | undefined;
+ }, {}, {}>;
+ /**
+  * Definition for a tool the client can call.
+diff --git a/dist/dts/McpServer.d.ts b/dist/dts/McpServer.d.ts
+index 0f73657e20dc6ec4cd30336e8f04862bcd5b773b..8de14ebb39abaee9f8a06da2c2d303d0b6e79394 100644
+--- a/dist/dts/McpServer.d.ts
++++ b/dist/dts/McpServer.d.ts
+@@ -101,6 +101,15 @@ export declare const run: (options: {
+ export declare const layer: (options: {
+     readonly name: string;
+     readonly version: string;
++    readonly title?: string;
++    readonly description?: string;
++    readonly websiteUrl?: string;
++    readonly icons?: ReadonlyArray<{
++        readonly src: string;
++        readonly mimeType?: string;
++        readonly sizes?: ReadonlyArray<string>;
++        readonly theme?: "light" | "dark";
++    }>;
+ }) => Layer.Layer<McpServer | McpServerClient, never, RpcServer.Protocol>;
+ /**
+  * Run the McpServer, using stdio for input and output.
+@@ -162,6 +171,15 @@ export declare const layer: (options: {
+ export declare const layerStdio: <EIn, RIn, EOut, ROut>(options: {
+     readonly name: string;
+     readonly version: string;
++    readonly title?: string;
++    readonly description?: string;
++    readonly websiteUrl?: string;
++    readonly icons?: ReadonlyArray<{
++        readonly src: string;
++        readonly mimeType?: string;
++        readonly sizes?: ReadonlyArray<string>;
++        readonly theme?: "light" | "dark";
++    }>;
+     readonly stdin: Stream<Uint8Array, EIn, RIn>;
+     readonly stdout: Sink<unknown, Uint8Array | string, unknown, EOut, ROut>;
+ }) => Layer.Layer<McpServer | McpServerClient, never, RIn | ROut>;
+@@ -226,6 +244,15 @@ export declare const layerStdio: <EIn, RIn, EOut, ROut>(options: {
+ export declare const layerHttp: <I = HttpRouter.Default>(options: {
+     readonly name: string;
+     readonly version: string;
++    readonly title?: string;
++    readonly description?: string;
++    readonly websiteUrl?: string;
++    readonly icons?: ReadonlyArray<{
++        readonly src: string;
++        readonly mimeType?: string;
++        readonly sizes?: ReadonlyArray<string>;
++        readonly theme?: "light" | "dark";
++    }>;
+     readonly path: HttpRouter.PathInput;
+     readonly routerTag?: HttpRouter.HttpRouter.TagClass<I, string, any, any>;
+ }) => Layer.Layer<McpServer | McpServerClient>;
+@@ -239,7 +266,16 @@ export declare const layerHttp: <I = HttpRouter.Default>(options: {
+  */
+ export declare const layerHttpRouter: (options: {
+     readonly name: string;
++    readonly title?: string;
+     readonly version: string;
++    readonly description?: string;
++    readonly websiteUrl?: string;
++    readonly icons?: ReadonlyArray<{
++        readonly src: string;
++        readonly mimeType?: string;
++        readonly sizes?: ReadonlyArray<string>;
++        readonly theme?: "light" | "dark";
++    }>;
+     readonly path: HttpRouter.PathInput;
+ }) => Layer.Layer<McpServer | McpServerClient, never, HttpLayerRouter.HttpRouter>;
+ /**
+diff --git a/dist/esm/McpSchema.js b/dist/esm/McpSchema.js
+index 0e450c1a11591c0f4d981a98f0df941ba1c1255a..685741f836542e3ba43d56f2d68aa7202028d217 100644
+--- a/dist/esm/McpSchema.js
++++ b/dist/esm/McpSchema.js
+@@ -138,7 +138,15 @@ export class Annotations extends /*#__PURE__*/Schema.Struct({
+ export class Implementation extends /*#__PURE__*/Schema.Struct({
+   name: Schema.String,
+   title: /*#__PURE__*/Schema.optional(Schema.String),
+-  version: Schema.String
++  version: Schema.String,
++  description: /*#__PURE__*/Schema.optional(Schema.String),
++  websiteUrl: /*#__PURE__*/Schema.optional(Schema.String),
++  icons: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Array(/*#__PURE__*/Schema.Struct({
++    src: Schema.String,
++    mimeType: /*#__PURE__*/Schema.optional(Schema.String),
++    sizes: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Array(Schema.String)),
++    theme: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Literal("light", "dark"))
++  })))
+ }) {}
+ /**
+  * Capabilities a client may support. Known capabilities are defined here, in
+@@ -1028,10 +1036,21 @@ export class Tool extends /*#__PURE__*/Schema.Class("@effect/ai/McpSchema/Tool")
+    * A JSON Schema object defining the expected parameters for the tool.
+    */
+   inputSchema: Schema.Unknown,
++  outputSchema: /*#__PURE__*/Schema.optional(Schema.Unknown),
+   /**
+    * Optional additional tool information.
+    */
+-  annotations: /*#__PURE__*/Schema.optional(ToolAnnotations)
++  annotations: /*#__PURE__*/Schema.optional(ToolAnnotations),
++  icons: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Array(/*#__PURE__*/Schema.Struct({
++    src: Schema.String,
++    mimeType: /*#__PURE__*/Schema.optional(Schema.String),
++    sizes: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Array(Schema.String)),
++    theme: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Literal("light", "dark"))
++  }))),
++  _meta: /*#__PURE__*/Schema.optional(/*#__PURE__*/Schema.Record({
++    key: Schema.String,
++    value: Schema.Unknown
++  }))
+ }) {}
+ /**
+  * The server's response to a tools/list request from the client.

@@ -1,0 +1,10 @@
+---
+description: Check Reintersect before assuming anything about this repository, the team, or the user.
+alwaysApply: true
+---
+
+Reintersect is available through the `reintersect` MCP server. Before you assume
+how this repository works, why a decision was made, which tools the team uses,
+or what the user prefers, call `SearchMemories` with the question. Cursor cannot
+inject memory into a prompt automatically, so this one call is what makes memory
+work here. Treat what comes back as something you already knew.

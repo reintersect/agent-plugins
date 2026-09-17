@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor sessionStart",
+        "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor beforeSubmitPrompt",
+        "timeout": 6
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor postToolUse",
+        "timeout": 3
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor postToolUseFailure",
+        "timeout": 3
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor afterShellExecution",
+        "timeout": 3
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor afterFileEdit",
+        "timeout": 3
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor afterAgentResponse",
+        "timeout": 3
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor preCompact",
+        "timeout": 5
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs\" hook cursor sessionEnd",
+        "timeout": 5
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@reintersect/agent-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "imports": {
+    "#*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/ai": "catalog:effect",
+    "@effect/platform": "catalog:effect",
+    "@effect/platform-node": "catalog:effect",
+    "@effect/rpc": "catalog:effect",
+    "effect": "catalog:effect"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:effect",
+    "@types/node": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

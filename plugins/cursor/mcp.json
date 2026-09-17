@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "reintersect": {
+      "command": "node",
+      "args": ["${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs", "mcp"]
+    }
+  }
+}

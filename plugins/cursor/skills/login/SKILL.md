@@ -1,0 +1,24 @@
+---
+name: login
+description: Sign this machine in to Reintersect so its tools work in every local coding agent. Use when the user asks to sign in or connect Reintersect, or when a Reintersect tool reports that it is not authenticated.
+disable-model-invocation: true
+---
+
+# Sign in to Reintersect
+
+One sign-in covers Claude Code, Cursor and Codex on this machine, because all
+three run the same binary against the same token file.
+
+```bash
+node "${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs" login
+```
+
+The command opens a browser to Reintersect's consent page and prints the URL as
+well, so it also works over SSH. Pick the workspace on the consent page; that
+choice binds this machine.
+
+If the user has a `rei_…` API key instead, tell them to export
+`REINTERSECT_API_KEY` in their shell profile: the key replaces the browser
+login entirely.
+
+Afterwards confirm with `/reintersect:status`.

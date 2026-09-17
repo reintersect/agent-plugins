@@ -1,0 +1,14 @@
+{
+  "name": "reintersect",
+  "displayName": "Reintersect",
+  "version": "0.1.0",
+  "description": "Reintersect for your coding agent.",
+  "author": {
+    "name": "Reintersect",
+    "email": "support@reintersect.com"
+  },
+  "homepage": "https://reintersect.com",
+  "repository": "https://github.com/reintersect/agent-plugins",
+  "license": "Apache-2.0",
+  "keywords": ["reintersect", "coding-agents", "mcp", "team-knowledge"]
+}

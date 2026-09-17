@@ -1,0 +1,29 @@
+packages:
+  - packages/*
+
+catalog:
+  '@biomejs/biome': ^2.3.4
+  '@types/node': ^22.18.8
+  tsdown: ^0.15.6
+  tsx: ^4.20.6
+  typescript: ^5.9.3
+  vitest: ^3.2.4
+
+catalogs:
+  effect:
+    '@effect/ai': 0.37.0
+    '@effect/experimental': 0.61.1
+    '@effect/platform': 0.97.1
+    '@effect/platform-node': 0.108.1
+    '@effect/rpc': 0.76.2
+    '@effect/vitest': 0.30.0
+    effect: 3.22.1
+
+overrides:
+  '@effect/experimental': catalog:effect
+  '@effect/platform': catalog:effect
+  '@effect/rpc': catalog:effect
+  effect: catalog:effect
+
+patchedDependencies:
+  '@effect/ai@0.37.0': patches/@effect__ai@0.37.0.patch

@@ -1,0 +1,44 @@
+{
+  "name": "@reintersect/opencode",
+  "version": "0.1.0",
+  "description": "Reintersect for OpenCode: recall what your team knows, capture what you learn, and reach Reintersect's tools from OpenCode.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "homepage": "https://reintersect.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reintersect/agent-plugins",
+    "directory": "packages/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "reintersect",
+    "mcp"
+  ],
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm --dir ../.. build"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "@types/node": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "bin": {
+    "reintersect-agent": "./dist/reintersect-agent.mjs"
+  }
+}

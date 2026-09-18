@@ -109915,6 +109915,7 @@ const PENDING_EXPIRY_MS = 10080 * 60 * 1e3;
 const STALE_RUNNING_MS = 300 * 1e3;
 const PENDING_LAUNCH_LIMIT = 5;
 const INGEST_BATCH_LIMIT = 200;
+const splitText = (text$5) => globalThis.Array.from({ length: Math.ceil(text$5.length / MAX_MESSAGE_CHARS) }, (_, index) => text$5.slice(index * MAX_MESSAGE_CHARS, (index + 1) * MAX_MESSAGE_CHARS));
 const buildEvents = (records, fromIndex, nextSeq) => {
 	const slice = records.slice(fromIndex);
 	if (!isNonEmptyReadonlyArray(slice)) return [];
@@ -109928,7 +109929,10 @@ const buildEvents = (records, fromIndex, nextSeq) => {
 		role: "evidence",
 		text: evidence,
 		observedAt
-	}] : []].map((draft, index) => ({
+	}] : []].flatMap((draft) => splitText(draft.text).map((text$5) => ({
+		...draft,
+		text: text$5
+	}))).map((draft, index) => ({
 		...draft,
 		seq: nextSeq + index
 	}));

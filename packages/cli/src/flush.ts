@@ -5,7 +5,7 @@ import { FileSystem, Path } from "@effect/platform";
 import { Array, Clock, Effect, Option, Schema } from "effect";
 import { Backend } from "#backend";
 import { renderEvidence } from "#capture";
-import { FlushWorkerBin } from "#config";
+import { FlushWorkerBin, MAX_MESSAGE_CHARS } from "#config";
 import type { CaptureRecord, Handoff, IngestEvent, SessionState } from "#schema";
 import { AgentStore, sessionKey } from "#store";
 
@@ -16,6 +16,11 @@ export const STALE_RUNNING_MS = 5 * 60 * 1_000;
 const PENDING_LAUNCH_LIMIT = 5;
 
 const INGEST_BATCH_LIMIT = 200;
+
+const splitText = (text: string) =>
+  globalThis.Array.from({ length: Math.ceil(text.length / MAX_MESSAGE_CHARS) }, (_, index) =>
+    text.slice(index * MAX_MESSAGE_CHARS, (index + 1) * MAX_MESSAGE_CHARS),
+  );
 
 export const buildEvents = (
   records: ReadonlyArray<CaptureRecord>,
@@ -37,7 +42,9 @@ export const buildEvents = (
     ...(evidence ? [{ role: "evidence" as const, text: evidence, observedAt }] : []),
   ];
 
-  return drafts.map((draft, index) => ({ ...draft, seq: nextSeq + index }));
+  return drafts
+    .flatMap((draft) => splitText(draft.text).map((text) => ({ ...draft, text })))
+    .map((draft, index) => ({ ...draft, seq: nextSeq + index }));
 };
 
 export const launchHandoff = (path: string) =>

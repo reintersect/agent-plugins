@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { beforeEach, describe, expect } from "vitest";
+import { renderEvidence } from "#capture";
+import { MAX_MESSAGE_CHARS } from "#config";
 import { buildEvents, recoverPending, STALE_RUNNING_MS } from "#flush";
 import type { CaptureRecord } from "#schema";
 import { app, makeAgentHome } from "#testing/harness";
@@ -33,6 +35,28 @@ describe("buildEvents", () => {
   it("continues the sequence from the previous flush and emits nothing when nothing is new", () => {
     expect(buildEvents(records, 2, 7).map((event) => event.seq)).toEqual([7, 8]);
     expect(buildEvents(records, records.length, 4)).toEqual([]);
+  });
+
+  it("splits oversized events without losing content", () => {
+    const oversized = "x".repeat(MAX_MESSAGE_CHARS * 2 + 1);
+    const records: CaptureRecord[] = [
+      { kind: "person", observedAt: at, text: oversized },
+      {
+        kind: "command",
+        observedAt: at,
+        command: oversized,
+        failed: false,
+        category: "shell",
+      },
+    ];
+    const events = buildEvents(records, 0, 7);
+    const person = events.filter((event) => event.role === "person");
+    const evidence = events.filter((event) => event.role === "evidence");
+
+    expect(events.map((event) => event.seq)).toEqual([7, 8, 9, 10, 11, 12]);
+    expect(events.every((event) => event.text.length <= MAX_MESSAGE_CHARS)).toBe(true);
+    expect(person.map((event) => event.text).join("")).toBe(oversized);
+    expect(evidence.map((event) => event.text).join("")).toBe(renderEvidence(records));
   });
 });
 

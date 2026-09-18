@@ -1,6 +1,6 @@
 {
   "name": "@reintersect/opencode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reintersect for OpenCode: recall what your team knows, capture what you learn, and reach Reintersect's tools from OpenCode.",
   "type": "module",
   "license": "Apache-2.0",

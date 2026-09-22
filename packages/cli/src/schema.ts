@@ -120,6 +120,7 @@ export const HookPayload = Schema.Struct({
   transcript_path: text,
   prompt: text,
   tool_name: text,
+  tool_use_id: text,
   tool_input: Schema.optional(Schema.Unknown),
   tool_response: Schema.optional(Schema.Unknown),
   tool_output: Schema.optional(Schema.Unknown),

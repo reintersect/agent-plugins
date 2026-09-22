@@ -85,7 +85,7 @@ export const status = Effect.gen(function* () {
     onNone: () => (signedIn ? "oauth" : "none"),
   });
   const lines = [
-    `Reintersect capture   ${paused ? "paused" : "active"}`,
+    `Capture setting       ${paused ? "paused" : "enabled (hook execution not verified)"}`,
     `API                   ${url}`,
     `Authentication        ${authentication}`,
     `Workspace             ${Option.match(workspace, { onNone: () => "unknown", onSome: (entry) => entry.name || entry.id })}`,

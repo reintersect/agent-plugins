@@ -129,6 +129,96 @@ describe("session lifecycle", () => {
 });
 
 describe("capture and flush", () => {
+  it.scopedLive(
+    "correlates Codex command outcomes without importing unrelated or paused records",
+    () =>
+      Effect.gen(function* () {
+        const transcript = join(state.home, "codex-transcript.jsonl");
+        const completed = (id: string, exitCode: number, output: string) => ({
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              id,
+              status: exitCode ? "failed" : "completed",
+              exit_code: exitCode,
+              aggregated_output: output,
+            },
+          },
+        });
+        const invalid = completed("bad-exit", 7, "invalid output");
+        const rows = [
+          completed("unrelated", 7, "unrelated output"),
+          completed("failure", 7, "1 failing"),
+          completed("success", 0, "private successful output"),
+          completed("paused", 7, "private paused output"),
+          { ...completed("bad-type", 7, "invalid output"), type: "response_item" },
+          {
+            ...invalid,
+            payload: {
+              ...invalid.payload,
+              item: { ...invalid.payload.item, exit_code: "7" },
+            },
+          },
+        ];
+        const source = `{malformed\n${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+        writeFileSync(transcript, source);
+        const codex = (event: string, extra: Record<string, unknown>) =>
+          app(
+            runHook(
+              "codex",
+              event,
+              JSON.stringify({
+                session_id: "cx-1",
+                cwd: state.repo,
+                transcript_path: transcript,
+                ...extra,
+              }),
+            ),
+          );
+        const tool = (id: string, command: string) =>
+          codex("post-tool", {
+            tool_name: "Bash",
+            tool_use_id: id,
+            tool_input: { command },
+            tool_response: "plain stdout without an exit code",
+          });
+
+        yield* codex("user-prompt", { prompt: "Check results." });
+        yield* tool("failure", "pnpm test");
+        yield* tool("success", "pnpm build");
+        for (const id of ["missing", "bad-type", "bad-exit"]) yield* tool(id, `echo ${id}`);
+        yield* app(setPaused(true));
+        yield* tool("paused", "echo private");
+        yield* app(setPaused(false));
+        yield* codex("stop", { last_assistant_message: "Reply intact." });
+        yield* tool("failure", "pnpm test");
+
+        const log = readFileSync(join(state.home, "sessions", "codex-cx-1.jsonl"), "utf8");
+        expect(
+          log
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+        ).toMatchObject([
+          { kind: "person", text: "Check results." },
+          { kind: "command", command: "pnpm test", failed: true, output: "1 failing" },
+          { kind: "command", command: "pnpm build", failed: false },
+          { kind: "agent", text: "Reply intact." },
+        ]);
+        expect(log).not.toContain("private");
+        expect(log).not.toContain("unrelated");
+        const saved = JSON.parse(
+          readFileSync(join(state.home, "sessions", "codex-cx-1.state.json"), "utf8"),
+        );
+        expect(saved.transcriptOffset).toBe(Buffer.byteLength(source));
+        expect(readFileSync(join(state.home, "errors.log"), "utf8")).toContain(
+          "Codex command completion not found in transcript",
+        );
+      }),
+  );
+
   it.scopedLive("ships prompts, agent text and rendered evidence to IngestCodingSession", () =>
     Effect.gen(function* () {
       const server = yield* backend();

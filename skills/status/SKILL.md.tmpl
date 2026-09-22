@@ -6,11 +6,23 @@ disable-model-invocation: false
 
 # Reintersect status
 
+{{CODEX_NOTE}}
 ```bash
 node "{{PLUGIN_ROOT}}/dist/reintersect-agent.mjs" status
 ```
 
 Summarise the report in plain language and relay its `hint` lines as the next
 step. If sign-in is missing or the API is unreachable, say clearly that
-memories are NOT being created and point at `{{PREFIX}}login`. Never report an
+memories are NOT being created and point at the login skill. Never report an
 authentication failure as "no memories found".
+
+In Codex, if capture is paused, relay the resume hint instead of diagnosing missing
+hooks. An enabled capture setting does not prove the hooks ran. Inspect only
+the current session's `codex-<session_id>.state.json` and `.jsonl` under the
+reported data directory's `sessions/` folder (use `CODEX_THREAD_ID` when available).
+Confirm a captured user prompt from this session; old sessions are not proof.
+If capture is enabled and the prompt is missing, report setup as incomplete and
+direct the user to review and trust Reintersect's hooks (`/hooks` in the Codex CLI),
+then start a new session. Never infer
+successful recall or upload merely from a local capture record; check the current
+session's injected context or advanced `flushedRecords` and relevant errors.

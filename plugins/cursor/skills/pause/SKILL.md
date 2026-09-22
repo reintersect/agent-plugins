@@ -6,6 +6,7 @@ disable-model-invocation: true
 
 # Pause capture
 
+
 ```bash
 node "${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs" pause
 ```
@@ -15,4 +16,4 @@ searchable, and that batches captured but not yet uploaded are held rather than
 discarded. The Reintersect tools keep working while capture is paused; only the
 automatic recording of this session stops.
 
-Turn it back on with `/reintersect:resume`.
+Turn it back on with the resume skill.

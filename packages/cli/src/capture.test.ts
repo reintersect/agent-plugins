@@ -32,6 +32,41 @@ describe("recordsFromTool", () => {
     expect(JSON.stringify(record)).not.toContain("must never leave");
   });
 
+  it("captures only successful Codex patch paths, including both sides of a rename", () => {
+    const patch = {
+      ...base,
+      toolName: "apply_patch",
+      toolInput: {
+        command: [
+          "*** Begin Patch",
+          "*** Add File: /repo/src/new.ts",
+          "+private file contents",
+          "+*** Add File: not-a-header.ts",
+          "*** Update File: src/old.ts",
+          "*** Move to: src/renamed.ts",
+          "@@",
+          "-private old contents",
+          "+private new contents",
+          "*** Delete File: /repo/src/deleted.ts",
+          "*** End Patch",
+        ].join("\n"),
+      },
+      toolResponse: { exit_code: 0, output: "private output" },
+      failed: undefined,
+    };
+
+    expect(recordsFromTool(patch)).toEqual(
+      ["src/new.ts", "src/old.ts", "src/renamed.ts", "src/deleted.ts"].map((path) => ({
+        kind: "file",
+        observedAt: base.observedAt,
+        action: "modified",
+        path,
+      })),
+    );
+    expect(recordsFromTool({ ...patch, toolResponse: { exit_code: 1 } })).toEqual([]);
+    expect(recordsFromTool({ ...patch, failed: true })).toEqual([]);
+  });
+
   it("keeps failed command output but never successful output", () => {
     const failed = recordsFromTool({
       ...base,

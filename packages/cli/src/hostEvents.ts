@@ -22,6 +22,7 @@ export interface HookInput {
   readonly sessionId: string;
   readonly cwd: string;
   readonly transcriptPath?: string;
+  readonly toolUseId?: string;
   readonly action: HookAction;
 }
 
@@ -118,6 +119,7 @@ export const normalizeHookInput = ({
     sessionId: payload.session_id || payload.conversation_id || "unknown-session",
     cwd,
     ...(transcriptPath ? { transcriptPath } : {}),
+    ...(payload.tool_use_id ? { toolUseId: payload.tool_use_id } : {}),
     action: (EVENTS[host][event] ?? (() => IGNORE))(payload),
   };
 };

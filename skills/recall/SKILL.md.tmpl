@@ -7,9 +7,10 @@ disable-model-invocation: true
 
 # Recall from Reintersect
 
-Call the `SearchMemories` tool with the user's question as `query`. Leave
-`repository` unset: the plugin fills in the current repository from the git
-remote.
+Call the `SearchMemories` tool with the user's question as `query`. In Codex,
+for a question about the current checkout, pass its git remote's `owner/repo`
+as `repository`. In other hosts, leave `repository` unset so the plugin fills
+it in from the git remote.
 
 Report the facts as answers, with their dates when the date matters. If nothing
 comes back, say so plainly instead of guessing, and do not invent memory ids.

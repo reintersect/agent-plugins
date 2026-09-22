@@ -36,6 +36,30 @@ const TranscriptRow = Schema.Struct({
 
 export type TranscriptRow = typeof TranscriptRow.Type;
 
+const decodeCodexCommandRow = Schema.decodeUnknownOption(
+  Schema.parseJson(
+    Schema.Struct({
+      type: Schema.Literal("event_msg"),
+      payload: Schema.Struct({
+        type: Schema.Literal("item_completed"),
+        item: Schema.Struct({
+          type: Schema.Literal("CommandExecution"),
+          id: Schema.String,
+          status: Schema.Literal("failed", "completed"),
+          exit_code: Schema.Int,
+          aggregated_output: Schema.String,
+        }),
+      }),
+    }),
+  ),
+);
+
+export const codexCommandResult = (text: string, toolUseId: string | undefined) =>
+  Array.findFirst(
+    Array.filterMap(text.split("\n"), (line) => decodeCodexCommandRow(line)),
+    (row) => row.payload.item.id === toolUseId,
+  ).pipe(Option.map((row) => row.payload.item));
+
 const ToolUseInput = Schema.Struct({
   subagent_type: Schema.optional(Schema.String),
   description: Schema.optional(Schema.String),

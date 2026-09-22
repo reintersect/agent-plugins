@@ -8,7 +8,12 @@ import { type HookAction, type HookInput, normalizeHookInput, renderHookOutput }
 import { boundedText, redactSecrets } from "#redact";
 import { type CaptureRecord, type Host, RecallResult, type SessionState } from "#schema";
 import { AgentStore } from "#store";
-import { parseTranscriptRows, readTranscriptChunk, transcriptMessages } from "#transcript";
+import {
+  codexCommandResult,
+  parseTranscriptRows,
+  readTranscriptChunk,
+  transcriptMessages,
+} from "#transcript";
 
 const RECALL_TIMEOUT = Duration.seconds(4);
 
@@ -165,10 +170,33 @@ const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>)
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
-    yield* ensureState(input);
+    const state = yield* ensureState(input);
+    let capture = action;
+
+    if (input.host === "codex" && action.toolName === "Bash") {
+      // ponytail: rescan this turn's suffix; index by tool id if large turns make this costly.
+      const chunk = input.transcriptPath
+        ? yield* readTranscriptChunk(
+            input.transcriptPath,
+            state.transcriptPath === input.transcriptPath ? state.transcriptOffset : 0,
+          )
+        : { text: "" };
+      const result = codexCommandResult(chunk.text, input.toolUseId);
+
+      if (Option.isNone(result)) {
+        yield* store.logError("capture", "Codex command completion not found in transcript");
+        return "";
+      }
+
+      capture = {
+        ...action,
+        failed: result.value.exit_code !== 0,
+        toolResponse: result.value.aggregated_output,
+      };
+    }
 
     const observedAt = yield* isoNow;
-    const records = recordsFromTool({ ...action, cwd: input.cwd, observedAt });
+    const records = recordsFromTool({ ...capture, cwd: input.cwd, observedAt });
 
     yield* Effect.forEach(
       records,
@@ -181,7 +209,10 @@ const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>)
 
 const transcriptRecords = (input: HookInput, state: SessionState, fallback: string) =>
   Effect.gen(function* () {
-    if (input.host !== "claudeCode" || input.transcriptPath === undefined) {
+    if (
+      (input.host !== "claudeCode" && input.host !== "codex") ||
+      input.transcriptPath === undefined
+    ) {
       return {
         records: Array.empty<CaptureRecord>(),
         offset: state.transcriptOffset,
@@ -195,7 +226,7 @@ const transcriptRecords = (input: HookInput, state: SessionState, fallback: stri
       sameFile ? state.transcriptOffset : 0,
     );
 
-    if (!chunk.text) {
+    if (input.host === "codex" || !chunk.text) {
       return { records: Array.empty<CaptureRecord>(), offset: chunk.endOffset, leafUuid: "" };
     }
 

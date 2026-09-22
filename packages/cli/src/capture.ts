@@ -88,6 +88,20 @@ export const recordsFromTool = (options: ToolCaptureOptions): ReadonlyArray<Capt
   );
   const failed = options.failed ?? responseFailed(options.toolResponse) ?? false;
 
+  if (options.toolName === "apply_patch") {
+    if (failed) return [];
+
+    return [
+      ...(input.command ?? "").matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm),
+    ].flatMap((match): FileRecord[] => {
+      const path = repositoryRelativePath(options.cwd, redactSecrets(match[1] ?? "").trim());
+
+      return path
+        ? [{ kind: "file", observedAt: options.observedAt, action: "modified", path }]
+        : [];
+    });
+  }
+
   if (SHELL_TOOL_NAMES.includes(options.toolName)) {
     const command = boundedText(input.command ?? "", MAX_COMMAND_CHARS);
 

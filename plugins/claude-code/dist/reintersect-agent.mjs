@@ -109355,6 +109355,7 @@ const HookPayload = Struct({
 	transcript_path: text,
 	prompt: text,
 	tool_name: text,
+	tool_use_id: text,
 	tool_input: optional(Unknown),
 	tool_response: optional(Unknown),
 	tool_output: optional(Unknown),
@@ -109753,7 +109754,7 @@ const status = gen(function* () {
 		onNone: () => signedIn ? "oauth" : "none"
 	});
 	const lines$2 = [
-		`Reintersect capture   ${paused ? "paused" : "active"}`,
+		`Capture setting       ${paused ? "paused" : "enabled (hook execution not verified)"}`,
 		`API                   ${url$3}`,
 		`Authentication        ${authentication}`,
 		`Workspace             ${match$22(workspace, {
@@ -109867,6 +109868,18 @@ const responseFailed = (response) => {
 const recordsFromTool = (options$6) => {
 	const input = getOrElse$5(decodeUnknownOption(ToolInput)(options$6.toolInput), () => ({}));
 	const failed = options$6.failed ?? responseFailed(options$6.toolResponse) ?? false;
+	if (options$6.toolName === "apply_patch") {
+		if (failed) return [];
+		return [...(input.command ?? "").matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].flatMap((match$24) => {
+			const path$2 = repositoryRelativePath(options$6.cwd, redactSecrets(match$24[1] ?? "").trim());
+			return path$2 ? [{
+				kind: "file",
+				observedAt: options$6.observedAt,
+				action: "modified",
+				path: path$2
+			}] : [];
+		});
+	}
 	if (SHELL_TOOL_NAMES.includes(options$6.toolName)) {
 		const command$1 = boundedText(input.command ?? "", MAX_COMMAND_CHARS);
 		if (!command$1) return [];
@@ -110102,6 +110115,7 @@ const normalizeHookInput = ({ event, fallbacks, host, raw: raw$4 }) => {
 		sessionId: payload.session_id || payload.conversation_id || "unknown-session",
 		cwd,
 		...transcriptPath ? { transcriptPath } : {},
+		...payload.tool_use_id ? { toolUseId: payload.tool_use_id } : {},
 		action: (EVENTS[host][event] ?? (() => IGNORE))(payload)
 	};
 };
@@ -110142,6 +110156,20 @@ const TranscriptRow = Struct({
 		content: optional(Unknown)
 	}))
 });
+const decodeCodexCommandRow = decodeUnknownOption(parseJson(Struct({
+	type: Literal("event_msg"),
+	payload: Struct({
+		type: Literal("item_completed"),
+		item: Struct({
+			type: Literal("CommandExecution"),
+			id: String$,
+			status: Literal("failed", "completed"),
+			exit_code: Int,
+			aggregated_output: String$
+		})
+	})
+})));
+const codexCommandResult = (text$5, toolUseId) => findFirst$7(filterMap$7(text$5.split("\n"), (line) => decodeCodexCommandRow(line)), (row) => row.payload.item.id === toolUseId).pipe(map$31((row) => row.payload.item));
 const ToolUseInput = Struct({
 	subagent_type: optional(String$),
 	description: optional(String$),
@@ -110417,10 +110445,23 @@ const onUserPrompt = (input, prompt) => gen(function* () {
 });
 const onTool = (input, action) => gen(function* () {
 	const store = yield* AgentStore;
-	yield* ensureState(input);
+	const state = yield* ensureState(input);
+	let capture$1 = action;
+	if (input.host === "codex" && action.toolName === "Bash") {
+		const result = codexCommandResult((input.transcriptPath ? yield* readTranscriptChunk(input.transcriptPath, state.transcriptPath === input.transcriptPath ? state.transcriptOffset : 0) : { text: "" }).text, input.toolUseId);
+		if (isNone$2(result)) {
+			yield* store.logError("capture", "Codex command completion not found in transcript");
+			return "";
+		}
+		capture$1 = {
+			...action,
+			failed: result.value.exit_code !== 0,
+			toolResponse: result.value.aggregated_output
+		};
+	}
 	const observedAt = yield* isoNow;
 	const records = recordsFromTool({
-		...action,
+		...capture$1,
 		cwd: input.cwd,
 		observedAt
 	});
@@ -110428,14 +110469,14 @@ const onTool = (input, action) => gen(function* () {
 	return "";
 });
 const transcriptRecords = (input, state, fallback) => gen(function* () {
-	if (input.host !== "claudeCode" || input.transcriptPath === void 0) return {
+	if (input.host !== "claudeCode" && input.host !== "codex" || input.transcriptPath === void 0) return {
 		records: empty$48(),
 		offset: state.transcriptOffset,
 		leafUuid: ""
 	};
 	const sameFile = state.transcriptPath === input.transcriptPath;
 	const chunk$5 = yield* readTranscriptChunk(input.transcriptPath, sameFile ? state.transcriptOffset : 0);
-	if (!chunk$5.text) return {
+	if (input.host === "codex" || !chunk$5.text) return {
 		records: empty$48(),
 		offset: chunk$5.endOffset,
 		leafUuid: ""

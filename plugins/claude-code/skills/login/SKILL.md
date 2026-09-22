@@ -9,6 +9,16 @@ disable-model-invocation: true
 One sign-in covers Claude Code, Cursor and Codex on this machine, because all
 three run the same binary against the same token file.
 
+In Codex, explain before signing in that setup also requires reviewing and
+trusting Reintersect's hooks (`/hooks` in the Codex CLI). Without that step, automatic recall
+and capture do not run. Guide the user through it; do not mark hooks trusted
+by editing Codex settings or bypassing its review.
+
+In Codex, find this skill's absolute `SKILL.md` path in the loaded skill list.
+The plugin root is two directories above this skill's directory. Use that path instead
+of `${CLAUDE_PLUGIN_ROOT}` in the command below.
+
+
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/dist/reintersect-agent.mjs" login
 ```
@@ -21,4 +31,7 @@ If the user has a `rei_…` API key instead, tell them to export
 `REINTERSECT_API_KEY` in their shell profile: the key replaces the browser
 login entirely.
 
-Afterwards confirm with `/reintersect:status`.
+Afterwards confirm with the status skill. In Codex, start a new session after
+sign-in and hook review so the MCP server reloads its tools and the session-start
+hook runs. Setup is incomplete until the workspace is reachable, Reintersect's
+tools are available, and the status skill verifies capture for that new session.

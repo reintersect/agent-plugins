@@ -154,16 +154,20 @@ describe("codex detection", () => {
 });
 
 describe("codex payloads", () => {
-  it("derives failure from the shell response and uses the claude output shape", () => {
+  it("preserves the tool id and leaves plain Bash output's status unknown", () => {
     expect(
       normalize("codex", "post-tool", {
         session_id: "cx-1",
         cwd: "/repo",
-        tool_name: "shell",
+        tool_name: "Bash",
+        tool_use_id: "call-1",
         tool_input: { command: "pnpm build" },
-        tool_response: { exit_code: 1, output: "boom" },
-      }).action,
-    ).toMatchObject({ _tag: "Tool", failed: true });
+        tool_response: "boom",
+      }),
+    ).toMatchObject({
+      toolUseId: "call-1",
+      action: { _tag: "Tool", toolName: "Bash", toolResponse: "boom", failed: undefined },
+    });
     expect(
       renderHookOutput("codex", "user-prompt", "block").pipe(Option.getOrElse(() => "")),
     ).toContain("UserPromptSubmit");

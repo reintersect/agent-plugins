@@ -12,8 +12,8 @@
   "license": "Apache-2.0",
   "keywords": ["reintersect", "coding-agents", "mcp", "team-knowledge"],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex-hooks.json",
+  "mcpServers": "./.codex-mcp.json",
   "interface": {
     "displayName": "Reintersect",
     "shortDescription": "Recall what your team knows, capture what you learn",
@@ -22,7 +22,10 @@
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Write"],
     "websiteURL": "https://reintersect.com",
-    "defaultPrompt": ["Recall what my team already knows about this repository"],
+    "defaultPrompt": [
+      "Set up Reintersect with $reintersect:login and verify automatic recall and capture",
+      "Recall what my team already knows about this repository"
+    ],
     "composerIcon": "./assets/icon.png",
     "logo": "./assets/logo.png",
     "screenshots": [],

@@ -23,11 +23,19 @@ const STAMPED = [
 
 const PACKAGES = ["packages/cli/package.json", "packages/opencode/package.json"];
 
+const CODEX_NOTE =
+  "In Codex, find this skill's absolute `SKILL.md` path in the loaded skill list.\n" +
+  "The plugin root is two directories above this skill's directory. Use that path instead\n" +
+  "of `${CLAUDE_PLUGIN_ROOT}` in the command below.\n\n";
+
 const stampVersion = (packageJson: string, version: string) =>
   packageJson.replace(/"version": "[^"]*"/, `"version": "${version}"`);
 
 const render = (template: string, pluginRoot: string) =>
-  template.replaceAll("{{PLUGIN_ROOT}}", pluginRoot).replaceAll("{{PREFIX}}", "/reintersect:");
+  template
+    .replaceAll("{{CODEX_NOTE}}", pluginRoot === "${CLAUDE_PLUGIN_ROOT}" ? CODEX_NOTE : "")
+    .replaceAll("{{PLUGIN_ROOT}}", pluginRoot)
+    .replaceAll("{{PREFIX}}", "/reintersect:");
 
 const openCodeCommand = (name: string, template: string) => {
   const match = template.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
@@ -36,8 +44,35 @@ const openCodeCommand = (name: string, template: string) => {
   return {
     name,
     description,
-    template: (match?.[2] ?? template).replaceAll("{{PREFIX}}", "/reintersect-").trim(),
+    template: (match?.[2] ?? template)
+      .replaceAll("{{CODEX_NOTE}}", "")
+      .replaceAll("{{PREFIX}}", "/reintersect-")
+      .trim(),
   };
+};
+
+const codexHooks = (source: string) => {
+  const config = JSON.parse(source) as {
+    hooks: Record<
+      string,
+      Array<{
+        matcher?: string;
+        hooks: Array<{ command: string; args?: string[]; timeout?: number }>;
+      }>
+    >;
+  };
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    for (const group of groups) {
+      for (const hook of group.hooks) {
+        hook.command = [hook.command, ...(hook.args ?? [])]
+          .map((part) => (part.includes("${CLAUDE_PLUGIN_ROOT}") ? `"${part}"` : part))
+          .join(" ");
+        delete hook.args;
+        if (event === "SessionEnd") hook.timeout = 3;
+      }
+    }
+  }
+  return `${JSON.stringify(config, null, 2)}\n`;
 };
 
 const emit = async (path: string, content: string, check: boolean) => {
@@ -76,6 +111,11 @@ const run = async (check: boolean) => {
         stampVersion(await readFile(join(ROOT, path), "utf8"), version),
         check,
       ),
+    ),
+    emit(
+      join(ROOT, "plugins/claude-code/hooks/codex-hooks.json"),
+      codexHooks(await readFile(join(ROOT, "plugins/claude-code/hooks/hooks.json"), "utf8")),
+      check,
     ),
   ];
   const stale = (

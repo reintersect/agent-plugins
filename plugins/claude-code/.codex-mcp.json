@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "reintersect": {
+      "command": "node",
+      "args": ["dist/reintersect-agent.mjs", "mcp"],
+      "cwd": ".",
+      "env_vars": ["REINTERSECT_API_KEY", "REINTERSECT_API_URL", "REINTERSECT_AGENT_HOME"]
+    }
+  }
+}

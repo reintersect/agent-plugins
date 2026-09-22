@@ -7,9 +7,11 @@ disable-model-invocation: true
 # Remember it in Reintersect
 
 Call the `Remember` tool with the fact written as one self-contained sentence,
-in the third person, including the names, paths and values it depends on. Leave
-`repository` unset so the plugin fills it in from the git remote, and use
-`scope: "personal"` only when the user describes themselves rather than the code.
+in the third person, including the names, paths and values it depends on. In
+Codex, pass the current checkout's git remote `owner/repo` as `repository` for
+repository facts. In other hosts, leave `repository` unset so the plugin fills
+it in from the git remote. Use `scope: "personal"` only when the user describes
+themselves rather than the code.
 
 Reintersect also extracts memories from the session automatically, so only call
 `Remember` when the user asked for it. Report the returned `memoryId` so they

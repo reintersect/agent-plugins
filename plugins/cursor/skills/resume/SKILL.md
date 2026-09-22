@@ -6,6 +6,7 @@ disable-model-invocation: true
 
 # Resume capture
 
+
 ```bash
 node "${CURSOR_PLUGIN_ROOT}/dist/reintersect-agent.mjs" resume
 ```

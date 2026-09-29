@@ -102,12 +102,12 @@ describe("pending recovery", () => {
     }),
   );
 
-  it.live("drops handoffs older than the expiry", () =>
+  it.live("retains a handoff older than a week for retry", () =>
     Effect.gen(function* () {
       handoff("d__session-end__1.json", 8 * 24 * 60 * 60 * 1_000);
 
-      expect(yield* app(recoverPending)).toBe(0);
-      expect(pending()).toEqual([]);
+      expect(yield* app(recoverPending)).toBe(1);
+      expect(pending()).toEqual(["d__session-end__1.running"]);
     }),
   );
 

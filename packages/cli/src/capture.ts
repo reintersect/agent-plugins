@@ -22,7 +22,15 @@ const FILE_TOOL_NAMES = [
 
 const MODIFYING_TOOL_NAMES = ["Edit", "Write", "MultiEdit", "NotebookEdit", "edit", "write"];
 
-const SHELL_TOOL_NAMES = ["Bash", "Shell", "shell", "bash", "run_terminal_cmd"];
+const SHELL_TOOL_NAMES = [
+  "Bash",
+  "Shell",
+  "shell",
+  "bash",
+  "run_terminal_cmd",
+  "exec_command",
+  "shell_command",
+];
 
 const COMMAND_CATEGORIES: ReadonlyArray<readonly [CommandRecord["category"], RegExp]> = [
   [
@@ -56,7 +64,13 @@ export const responseText = (response: unknown): string => {
   const decoded = decodeResponse(response);
 
   return Array.findFirst(
-    [decoded.output, decoded.stdout, decoded.stderr, decoded.error_message],
+    [
+      decoded.output,
+      decoded.aggregated_output,
+      decoded.stdout,
+      decoded.stderr,
+      decoded.error_message,
+    ],
     (value): value is string => Predicate.isString(value) && value.length > 0,
   ).pipe(Option.getOrElse(() => ""));
 };
@@ -88,6 +102,13 @@ export const recordsFromTool = (options: ToolCaptureOptions): ReadonlyArray<Capt
   );
   const failed = options.failed ?? responseFailed(options.toolResponse) ?? false;
 
+  if (options.toolName === "SubagentHandback") {
+    const text = redactSecrets(input.message ?? "").trim();
+    return text
+      ? [{ kind: "agent", observedAt: options.observedAt, text: `Subagent report:\n${text}` }]
+      : [];
+  }
+
   if (options.toolName === "apply_patch") {
     if (failed) return [];
 
@@ -103,7 +124,7 @@ export const recordsFromTool = (options: ToolCaptureOptions): ReadonlyArray<Capt
   }
 
   if (SHELL_TOOL_NAMES.includes(options.toolName)) {
-    const command = boundedText(input.command ?? "", MAX_COMMAND_CHARS);
+    const command = boundedText(input.command ?? input.cmd ?? "", MAX_COMMAND_CHARS);
 
     if (!command) return [];
 

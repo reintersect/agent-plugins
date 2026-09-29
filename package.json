@@ -12,6 +12,7 @@
     "build": "pnpm -r build && tsx scripts/build.ts",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm -r build && tsx scripts/build.ts --check",
     "test": "pnpm -r test",
+    "test:native": "node scripts/native-smoke.mjs",
     "typecheck": "pnpm -r typecheck && tsc --noEmit -p tsconfig.json",
     "lint": "biome check .",
     "format": "biome check --write ."

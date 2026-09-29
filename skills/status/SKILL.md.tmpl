@@ -25,4 +25,9 @@ If capture is enabled and the prompt is missing, report setup as incomplete and
 direct the user to review and trust Reintersect's hooks (`/hooks` in the Codex CLI),
 then start a new session. Never infer
 successful recall or upload merely from a local capture record; check the current
-session's injected context or advanced `flushedRecords` and relevant errors.
+session's `recall/` ledger and produced hook output, or advanced `flushedRecords` and relevant errors.
+
+Report recall attempts, successful empty results, partial results and failures separately.
+Mention scope-held batches and locally unassigned records without exposing their contents.
+Never delete pending data to fix an error. The runtime version describes this bundle; check
+the installed host plugin version separately after an update.

@@ -4,6 +4,8 @@ import { HookPayload, type Host } from "#schema";
 
 export type HookAction =
   | { readonly _tag: "SessionStart" }
+  | { readonly _tag: "SubagentStart" }
+  | { readonly _tag: "Refresh" }
   | { readonly _tag: "UserPrompt"; readonly prompt: string }
   | {
       readonly _tag: "Tool";
@@ -24,6 +26,10 @@ export interface HookInput {
   readonly transcriptPath?: string;
   readonly toolUseId?: string;
   readonly action: HookAction;
+  readonly source?: string;
+  readonly agentId?: string;
+  readonly agentType?: string;
+  readonly turnId?: string;
 }
 
 type Mapper = (payload: HookPayload) => HookAction;
@@ -39,6 +45,8 @@ const toolAction = (payload: HookPayload, failed?: boolean): HookAction => ({
 });
 
 const CLAUDE_EVENTS: Record<string, Mapper> = {
+  "subagent-start": () => ({ _tag: "SubagentStart" }),
+  "background-recall": () => ({ _tag: "Refresh" }),
   "session-start": () => ({ _tag: "SessionStart" }),
   "user-prompt": (payload) => ({ _tag: "UserPrompt", prompt: payload.prompt ?? "" }),
   "post-tool": (payload) => toolAction(payload),
@@ -120,6 +128,10 @@ export const normalizeHookInput = ({
     cwd,
     ...(transcriptPath ? { transcriptPath } : {}),
     ...(payload.tool_use_id ? { toolUseId: payload.tool_use_id } : {}),
+    ...(payload.source ? { source: payload.source } : {}),
+    ...(payload.agent_id ? { agentId: payload.agent_id } : {}),
+    ...(payload.agent_type ? { agentType: payload.agent_type } : {}),
+    ...(payload.turn_id ? { turnId: payload.turn_id } : {}),
     action: (EVENTS[host][event] ?? (() => IGNORE))(payload),
   };
 };
@@ -127,10 +139,17 @@ export const normalizeHookInput = ({
 const CLAUDE_INJECTING_EVENTS: Record<string, string> = {
   "session-start": "SessionStart",
   "user-prompt": "UserPromptSubmit",
+  "subagent-start": "SubagentStart",
+  "background-recall": "PostToolUse",
 };
 
-export const renderHookOutput = (host: Host, event: string, additionalContext: string) => {
-  if (additionalContext.length === 0) return Option.none<string>();
+export const renderHookOutput = (
+  host: Host,
+  event: string,
+  additionalContext: string,
+  systemMessage?: string,
+) => {
+  if (additionalContext.length === 0 && systemMessage === undefined) return Option.none<string>();
 
   if (host === "cursor") {
     return event === "sessionStart"
@@ -140,7 +159,10 @@ export const renderHookOutput = (host: Host, event: string, additionalContext: s
 
   return Option.fromNullable(CLAUDE_INJECTING_EVENTS[event]).pipe(
     Option.map((hookEventName) =>
-      JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext } }),
+      JSON.stringify({
+        ...(systemMessage ? { systemMessage } : {}),
+        ...(additionalContext ? { hookSpecificOutput: { hookEventName, additionalContext } } : {}),
+      }),
     ),
   );
 };

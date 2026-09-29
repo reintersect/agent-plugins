@@ -1,33 +1,24 @@
-import { Array, DateTime, Duration, Effect, Match, Option, Schema } from "effect";
-import { Backend, hasCredentials } from "#backend";
+import { Array, Clock, DateTime, Effect, Match, Option, Schema } from "effect";
+import { Backend } from "#backend";
 import { recordsFromTool } from "#capture";
-import { CursorTranscriptPath, HostProjectDir, MAX_MESSAGE_CHARS } from "#config";
+import { captureRecords } from "#captureRecords";
+import { CursorTranscriptPath, HostProjectDir } from "#config";
 import { recoverPending, scheduleFlush } from "#flush";
 import { gitInfo } from "#git";
+import { queueWarning } from "#health";
 import { type HookAction, type HookInput, normalizeHookInput, renderHookOutput } from "#hostEvents";
-import { boundedText, redactSecrets } from "#redact";
-import { type CaptureRecord, type Host, RecallResult, type SessionState } from "#schema";
-import { AgentStore } from "#store";
+import { currentCredentialKey } from "#identity";
+import { nativeCommandResult } from "#nativeCommand";
+import { recall } from "#recall";
+import { redactSecrets } from "#redact";
+import type { CaptureRecord, Host, SessionState } from "#schema";
+import { AgentStore, sessionKey } from "#store";
 import {
   codexCommandResult,
   parseTranscriptRows,
   readTranscriptChunk,
   transcriptMessages,
 } from "#transcript";
-
-const RECALL_TIMEOUT = Duration.seconds(4);
-
-const MIN_RECALL_PROMPT_CHARS = 20;
-
-const MAX_RECALL_QUERY_CHARS = 2_000;
-
-const RECALL_LIMIT = 8;
-
-const FLUSH_EXCHANGE_THRESHOLD = 5;
-
-const FLUSH_CHAR_THRESHOLD = 40_000;
-
-const EMPTY_RECALL = { context: "", memoryIds: Array.empty<string>() };
 
 const isoNow = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -41,6 +32,9 @@ const freshState = (input: HookInput): SessionState => ({
   transcriptOffset: 0,
   injectedMemoryIds: [],
   firstPromptDone: false,
+  promptVersion: 0,
+  recentSignals: [],
+  heldRecords: [],
 });
 
 const ensureState = (input: HookInput) =>
@@ -51,85 +45,33 @@ const ensureState = (input: HookInput) =>
 
     if (Option.isSome(existing)) return existing.value;
 
-    const state = { ...freshState(input), ...(yield* gitInfo(input.cwd)) };
+    const state = {
+      ...freshState(input),
+      credentialKey: yield* currentCredentialKey,
+      apiUrl: yield* (yield* Backend).apiUrl,
+      ...(yield* gitInfo(input.cwd)),
+    };
 
     yield* store.writeState(state);
 
     return state;
   });
 
-export const withoutInjectedIds = (context: string, injected: ReadonlySet<string>) => {
-  if (context.length === 0 || injected.size === 0) return context;
-
-  const kept = context.split("\n").filter((line) => {
-    const id = line.match(/\bid ([A-Za-z0-9_-]+)\)?\s*$/)?.[1];
-
-    return id === undefined || !injected.has(id);
-  });
-
-  return kept.some((line) => line.trimStart().startsWith("- ")) ? kept.join("\n") : "";
-};
-
-const tryRecall = (state: SessionState, prompt: string) =>
-  Effect.gen(function* () {
-    const backend = yield* Backend;
-    const store = yield* AgentStore;
-
-    const injected = new Set(state.injectedMemoryIds);
-
-    return yield* backend
-      .callTool(
-        "RecallForCodingSession",
-        {
-          prompt: redactSecrets(prompt).slice(0, MAX_RECALL_QUERY_CHARS),
-          host: state.host,
-          ...(state.repository === undefined ? {} : { repository: state.repository }),
-          ...(state.branch === undefined ? {} : { branch: state.branch }),
-          limit: RECALL_LIMIT,
-        },
-        "Recalling what Reintersect already knows before this local coding turn",
-        RecallResult,
-      )
-      .pipe(
-        Effect.timeout(RECALL_TIMEOUT),
-        Effect.map((result) => ({
-          context: withoutInjectedIds(result.context.trim(), injected),
-          memoryIds: result.memoryIds,
-        })),
-        Effect.catchAll((error) => store.logError("recall", error).pipe(Effect.as(EMPTY_RECALL))),
-      );
-  });
-
-const rememberInjected = (state: SessionState, memoryIds: ReadonlyArray<string>) =>
-  Array.dedupe([...state.injectedMemoryIds, ...memoryIds]);
-
 const onSessionStart = (input: HookInput) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
-    yield* recoverPending.pipe(Effect.ignore);
-
-    const existing = yield* store.readState(input.host, input.sessionId);
-    const state = {
-      ...Option.getOrElse(existing, () => freshState(input)),
-      ...(yield* gitInfo(input.cwd)),
-    };
-
-    yield* store.writeState(state);
-
-    if (!(yield* hasCredentials)) return "";
-
-    const where = state.repository
-      ? `starting a session in ${state.repository}${state.branch ? ` on branch ${state.branch}` : ""}`
-      : `starting a coding session in ${input.cwd}`;
-    const result = yield* tryRecall(state, where);
-
-    yield* Effect.when(
-      store.writeState({ ...state, injectedMemoryIds: rememberInjected(state, result.memoryIds) }),
-      () => result.context.length > 0,
-    );
-
-    return result.context;
+    const state = yield* ensureState(input);
+    const git = yield* gitInfo(input.cwd);
+    const changedRepository = state.repository !== undefined && git.repository !== state.repository;
+    yield* store.writeState({
+      ...state,
+      ...(changedRepository ? {} : git),
+      scopeMismatch: state.scopeMismatch || changedRepository,
+      scopeChanged: state.scopeChanged || changedRepository,
+      lastHookAt: yield* Clock.currentTimeMillis,
+    });
+    return "";
   });
 
 const onUserPrompt = (input: HookInput, prompt: string) =>
@@ -137,33 +79,49 @@ const onUserPrompt = (input: HookInput, prompt: string) =>
     const store = yield* AgentStore;
 
     const state = yield* ensureState(input);
-    const text = boundedText(prompt, MAX_MESSAGE_CHARS);
+    const text = redactSecrets(prompt).trim();
     const observedAt = yield* isoNow;
+    const credentialKey = yield* currentCredentialKey;
+    const git = yield* gitInfo(input.cwd);
+    const changedRepository = state.repository !== undefined && git.repository !== state.repository;
+    const scopeMismatch =
+      input.host === "claudeCode" ||
+      input.host === "codex" ||
+      state.scopeMismatch ||
+      state.scopeChanged ||
+      changedRepository ||
+      (state.credentialKey !== undefined && credentialKey !== state.credentialKey);
 
-    yield* Effect.when(
-      store.appendRecord(input.host, input.sessionId, { kind: "person", observedAt, text }),
-      () => text.length > 0,
-    );
-
-    const eligible =
-      input.host !== "cursor" &&
-      !state.firstPromptDone &&
-      text.length >= MIN_RECALL_PROMPT_CHARS &&
-      (yield* hasCredentials);
-    const result = yield* Effect.if(eligible, {
-      onTrue: () => tryRecall(state, text),
-      onFalse: () => Effect.succeed(EMPTY_RECALL),
-    });
-
+    yield* store
+      .appendRecord(input.host, input.sessionId, { kind: "person", observedAt, text })
+      .pipe(Effect.when(() => text.length > 0 && !scopeMismatch));
     yield* store.writeState({
       ...state,
-      firstPromptDone: state.firstPromptDone || eligible,
+      ...(changedRepository ? {} : git),
+      scopeMismatch,
+      scopeChanged: state.scopeChanged || changedRepository,
+      heldRecords:
+        scopeMismatch && text
+          ? [
+              ...state.heldRecords,
+              {
+                credentialKey,
+                promptVersion: state.promptVersion + 1,
+                record: { kind: "person", observedAt, text },
+              },
+            ]
+          : state.heldRecords,
+      credentialKey: state.credentialKey ?? credentialKey,
+      promptVersion: state.promptVersion + 1,
+      skipTranscript: false,
       pendingChars: state.pendingChars + text.length,
+      previousPromptText: state.lastPromptText,
       lastPromptText: text,
-      injectedMemoryIds: rememberInjected(state, result.memoryIds),
+      recentSignals: [],
+      lastHookAt: yield* Clock.currentTimeMillis,
+      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
     });
-
-    return result.context;
+    return "";
   });
 
 const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>) =>
@@ -171,38 +129,58 @@ const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>)
     const store = yield* AgentStore;
 
     const state = yield* ensureState(input);
-    let capture = action;
 
-    if (input.host === "codex" && action.toolName === "Bash") {
-      // ponytail: rescan this turn's suffix; index by tool id if large turns make this costly.
-      const chunk = input.transcriptPath
-        ? yield* readTranscriptChunk(
-            input.transcriptPath,
-            state.transcriptPath === input.transcriptPath ? state.transcriptOffset : 0,
-          )
-        : { text: "" };
-      const result = codexCommandResult(chunk.text, input.toolUseId);
+    const capture = yield* Effect.gen(function* () {
+      if (input.host === "codex" && action.toolName === "Bash" && action.failed === undefined) {
+        const native = nativeCommandResult(action.toolResponse);
+        if (Option.isSome(native))
+          return Option.some({
+            ...action,
+            failed: native.value.exit_code !== 0,
+            toolResponse: native.value.aggregated_output,
+          });
 
-      if (Option.isNone(result)) {
-        yield* store.logError("capture", "Codex command completion not found in transcript");
-        return "";
+        // ponytail: rescan this turn's suffix; index by tool id if large turns make this costly.
+        const chunk = input.transcriptPath
+          ? yield* readTranscriptChunk(
+              input.transcriptPath,
+              state.transcriptPath === input.transcriptPath ? state.transcriptOffset : 0,
+            )
+          : { text: "" };
+        const result = codexCommandResult(chunk.text, input.toolUseId);
+
+        if (Option.isNone(result)) {
+          yield* store.logError("capture codex_completion_missing", new Error());
+          return Option.none<Extract<HookAction, { _tag: "Tool" }>>();
+        }
+
+        return Option.some({
+          ...action,
+          failed: result.value.exit_code !== 0,
+          toolResponse: result.value.aggregated_output,
+        });
       }
+      return Option.some(action);
+    });
 
-      capture = {
-        ...action,
-        failed: result.value.exit_code !== 0,
-        toolResponse: result.value.aggregated_output,
-      };
-    }
+    if (Option.isNone(capture)) return "";
 
     const observedAt = yield* isoNow;
-    const records = recordsFromTool({ ...capture, cwd: input.cwd, observedAt });
+    const records = recordsFromTool({ ...capture.value, cwd: input.cwd, observedAt });
 
-    yield* Effect.forEach(
-      records,
-      (record) => store.appendRecord(input.host, input.sessionId, record),
-      { discard: true },
-    );
+    const captured = yield* captureRecords({ input, state, records });
+    const signals = records.flatMap((record) => {
+      if (record.kind === "file") return [`File ${record.action}: ${record.path}`];
+      if (record.kind === "command" && record.failed)
+        return [`Failed command: ${record.command.slice(0, 200)} ${record.output ?? ""}`];
+      return [];
+    });
+    yield* store.writeState({
+      ...captured,
+      recentSignals: [...state.recentSignals, ...signals].slice(-6),
+      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
+      lastHookAt: yield* Clock.currentTimeMillis,
+    });
 
     return "";
   });
@@ -265,8 +243,18 @@ const onAssistantStop = (input: HookInput, text: string) =>
     const store = yield* AgentStore;
 
     const state = yield* ensureState(input);
-    const fallback = boundedText(text, MAX_MESSAGE_CHARS);
-    const fromTranscript = yield* transcriptRecords(input, state, fallback);
+
+    const fallback = redactSecrets(text).trim();
+    const fromTranscript = yield* transcriptRecords(input, state, fallback).pipe(
+      Effect.when(() => !state.skipTranscript),
+      Effect.map(
+        Option.getOrElse(() => ({
+          records: Array.empty<CaptureRecord>(),
+          offset: state.transcriptOffset,
+          leafUuid: "",
+        })),
+      ),
+    );
     const observedAt = yield* isoNow;
     const records = Array.isNonEmptyReadonlyArray(fromTranscript.records)
       ? fromTranscript.records
@@ -276,30 +264,20 @@ const onAssistantStop = (input: HookInput, text: string) =>
           ),
         );
 
-    yield* Effect.forEach(
-      records,
-      (record) => store.appendRecord(input.host, input.sessionId, record),
-      { discard: true },
-    );
+    const captured = yield* captureRecords({ input, state, records });
 
     const exchanges = state.exchanges + 1;
     const pendingChars = state.pendingChars + messageChars(records);
 
     yield* store.writeState({
-      ...state,
+      ...captured,
       exchanges,
       pendingChars,
+      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
       ...(input.transcriptPath ? { transcriptPath: input.transcriptPath } : {}),
       transcriptOffset: fromTranscript.offset,
       ...(fromTranscript.leafUuid ? { transcriptLeafUuid: fromTranscript.leafUuid } : {}),
     });
-    yield* Effect.when(
-      scheduleFlush({ host: input.host, sessionId: input.sessionId, reason: "threshold" }).pipe(
-        Effect.ignore,
-      ),
-      () => exchanges >= FLUSH_EXCHANGE_THRESHOLD || pendingChars >= FLUSH_CHAR_THRESHOLD,
-    );
-
     return "";
   });
 
@@ -307,30 +285,29 @@ const onSubagentStop = (input: HookInput, agentType: string, text: string) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
-    const body = boundedText(text, MAX_MESSAGE_CHARS);
+    const body = redactSecrets(text).trim();
 
     if (!body) return "";
 
-    yield* ensureState(input);
+    const state = yield* ensureState(input);
 
     const observedAt = yield* isoNow;
 
-    yield* store.appendRecord(input.host, input.sessionId, {
-      kind: "agent",
-      observedAt,
-      text: `Subagent (${agentType}) result:\n${body}`,
+    const captured = yield* captureRecords({
+      input,
+      state,
+      records: [
+        {
+          kind: "agent",
+          observedAt,
+          text: `Subagent (${agentType}) result:\n${body}`,
+        },
+      ],
     });
+    yield* store.writeState(captured);
 
     return "";
   });
-
-const onFlush = (input: HookInput, reason: string) =>
-  ensureState(input).pipe(
-    Effect.zipRight(
-      scheduleFlush({ host: input.host, sessionId: input.sessionId, reason }).pipe(Effect.ignore),
-    ),
-    Effect.as(""),
-  );
 
 const parseStdin = Schema.decodeUnknownOption(Schema.parseJson());
 
@@ -349,22 +326,64 @@ export const runHook = (host: Host, event: string, stdin: string) =>
 
     if (yield* store.isPaused) return Option.none<string>();
 
-    const context = yield* Match.value(input.action).pipe(
-      Match.tag("SessionStart", () => onSessionStart(input)),
-      Match.tag("UserPrompt", (action) => onUserPrompt(input, action.prompt)),
-      Match.tag("Tool", (action) => onTool(input, action)),
-      Match.tag("AssistantStop", (action) => onAssistantStop(input, action.text)),
-      Match.tag("SubagentStop", (action) => onSubagentStop(input, action.agentType, action.text)),
-      Match.tag("Flush", (action) => onFlush(input, action.reason)),
-      Match.tag("Ignore", () => Effect.succeed("")),
-      Match.exhaustive,
+    if (input.sessionId === "unknown-session") return Option.none<string>();
+
+    const startedAt = yield* Clock.currentTimeMillis;
+    yield* store.withLock(
+      sessionKey(host, input.sessionId),
+      Match.value(input.action).pipe(
+        Match.tag("SessionStart", () => onSessionStart(input)),
+        Match.tag("UserPrompt", (action) => onUserPrompt(input, action.prompt)),
+        Match.tag("Tool", (action) => onTool(input, action)),
+        Match.tag("AssistantStop", (action) => onAssistantStop(input, action.text)),
+        Match.tag("SubagentStop", (action) => onSubagentStop(input, action.agentType, action.text)),
+        Match.orElse(() => ensureState(input).pipe(Effect.as(""))),
+      ),
     );
 
-    return renderHookOutput(host, event, context);
+    const injecting = ["SessionStart", "UserPrompt", "SubagentStart", "Refresh"].includes(
+      input.action._tag,
+    );
+    const flush =
+      input.action._tag === "Flush" ||
+      input.action._tag === "AssistantStop" ||
+      input.action._tag === "SubagentStop" ||
+      input.action._tag === "Refresh";
+
+    yield* scheduleFlush({ host, sessionId: input.sessionId, reason: event }).pipe(
+      Effect.when(() => flush),
+      Effect.ignore,
+    );
+    yield* recoverPending.pipe(
+      Effect.when(() => injecting || flush),
+      Effect.ignore,
+    );
+    const warning = yield* queueWarning(input).pipe(
+      Effect.when(() => injecting && input.action._tag !== "Refresh"),
+      Effect.orElseSucceed(() => Option.none<string>()),
+    );
+    const output = yield* Effect.if(injecting, {
+      onTrue: () => recall(input, startedAt),
+      onFalse: () => Effect.succeed({ context: "", warning: undefined }),
+    });
+    return renderHookOutput(
+      host,
+      event,
+      output.context,
+      output.warning ?? Option.getOrUndefined(warning),
+    );
   }).pipe(
+    Effect.timeoutOption(
+      event === "background-recall" || event === "session-start" || event === "sessionStart"
+        ? "19 seconds"
+        : "4 seconds",
+    ),
+    Effect.map(Option.flatten),
     Effect.catchAll((error) =>
       AgentStore.pipe(
-        Effect.flatMap((store) => store.logError(`hook ${host} ${event}`, error)),
+        Effect.flatMap((store) =>
+          store.logError(`hook ${host} ${event}`, error).pipe(Effect.ignore),
+        ),
         Effect.as(Option.none<string>()),
       ),
     ),

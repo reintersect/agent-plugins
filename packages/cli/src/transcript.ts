@@ -1,7 +1,6 @@
 import { FileSystem } from "@effect/platform";
 import { Array, Effect, Option, Schema } from "effect";
-import { MAX_MESSAGE_CHARS } from "#config";
-import { boundedText, redactSecrets } from "#redact";
+import { redactSecrets } from "#redact";
 
 export interface TranscriptMessage {
   readonly role: "user" | "assistant";
@@ -181,10 +180,7 @@ const agentMessages = (tool: ToolUse, result: string): ReadonlyArray<TranscriptM
     ? [
         {
           role: "assistant" as const,
-          content: boundedText(
-            `${agentHeading("Subagent assignment", tool.input)}\n${prompt}`,
-            MAX_MESSAGE_CHARS,
-          ),
+          content: redactSecrets(`${agentHeading("Subagent assignment", tool.input)}\n${prompt}`),
         },
       ]
     : [];
@@ -193,10 +189,7 @@ const agentMessages = (tool: ToolUse, result: string): ReadonlyArray<TranscriptM
     ...assignment,
     {
       role: "assistant",
-      content: boundedText(
-        `${agentHeading("Subagent response", tool.input)}\n${trimmed}`,
-        MAX_MESSAGE_CHARS,
-      ),
+      content: redactSecrets(`${agentHeading("Subagent response", tool.input)}\n${trimmed}`),
     },
   ];
 };
@@ -228,10 +221,7 @@ const toolResultMessages = (
     return [
       {
         role: "user",
-        content: boundedText(
-          `User answers to the agent's questions:\n${result}`,
-          MAX_MESSAGE_CHARS,
-        ),
+        content: redactSecrets(`User answers to the agent's questions:\n${result}`),
       },
     ];
   }
@@ -242,7 +232,7 @@ const toolResultMessages = (
     ? [
         {
           role: "assistant",
-          content: boundedText(`Approved implementation plan:\n${plan}`, MAX_MESSAGE_CHARS),
+          content: redactSecrets(`Approved implementation plan:\n${plan}`),
         },
       ]
     : [];
@@ -260,12 +250,12 @@ const rowMessages = (
 
     const human = humanPromptText(row);
 
-    return human ? [{ role: "user", content: boundedText(human, MAX_MESSAGE_CHARS) }] : [];
+    return human ? [{ role: "user", content: redactSecrets(human) }] : [];
   }
 
   return Option.getOrElse(decodeBlocks(content), () => []).flatMap((block) => {
     if (role === "assistant" && block.type === "text") {
-      const text = boundedText(block.text ?? "", MAX_MESSAGE_CHARS);
+      const text = redactSecrets(block.text ?? "");
 
       return text ? [{ role: "assistant" as const, content: text }] : [];
     }
@@ -306,7 +296,7 @@ export interface TranscriptOptions {
 
 export const transcriptMessages = (options: TranscriptOptions) => {
   const chain = activeChain(options.rows, options.sessionId);
-  const fallback = boundedText(options.fallbackAssistantMessage ?? "", MAX_MESSAGE_CHARS);
+  const fallback = redactSecrets(options.fallbackAssistantMessage ?? "");
   const leafUuid = Option.getOrElse(Array.last(chain), () => ({ uuid: "" })).uuid;
 
   if (chain.length === 0) {

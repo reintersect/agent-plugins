@@ -3,15 +3,17 @@ import { it } from "@effect/vitest";
 import { Effect, Layer, Queue, Sink, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect } from "vitest";
 import { CLIENT_NAME } from "#config";
+import { runHook } from "#hook";
 import { proxyLayer } from "#mcpProxy";
 import { AppLive } from "#runtime";
+import { AgentStore } from "#store";
 import {
   FAKE_INPUT_SCHEMA,
   type FakeBackendOptions,
   fakeBackend,
   startFakeBackend,
 } from "#testing/fakeBackend";
-import { makeAgentHome, makeGitRepo } from "#testing/harness";
+import { app, makeAgentHome, makeGitRepo } from "#testing/harness";
 
 const encoder = new TextEncoder();
 
@@ -151,6 +153,49 @@ describe("stdio proxy", () => {
       });
 
       expect(server.calls[0]?.arguments).not.toHaveProperty("repository");
+    }),
+  );
+
+  it.scopedLive("holds active sessions when SetWorkspace changes the authenticated scope", () =>
+    Effect.gen(function* () {
+      yield* fakeBackend({
+        tools: ["RecallForCodingSession", "SetWorkspace"],
+        onCall: (call) =>
+          call.name === "SetWorkspace"
+            ? { id: "org-b", name: "B" }
+            : {
+                context: "",
+                memoryIds: [],
+                items: [],
+                invalidatedMemoryIds: [],
+                invalidatedProfileKeys: [],
+                scopeKey: "org-a:member-a",
+                status: "complete",
+              },
+      });
+      yield* app(
+        runHook(
+          "codex",
+          "user-prompt",
+          JSON.stringify({
+            session_id: "scope-fixture",
+            cwd: env.repo,
+            prompt: "Workspace A task",
+          }),
+        ),
+      );
+      const proxy = yield* startProxy;
+      const reply = yield* proxy.request(2, "tools/call", {
+        name: "SetWorkspace",
+        arguments: { workspaceId: "org-b", context: "Switch fixture workspace" },
+      });
+      expect(reply.result?.isError).not.toBe(true);
+      const state = yield* app(
+        AgentStore.pipe(Effect.flatMap((store) => store.readState("codex", "scope-fixture"))),
+      );
+      expect(state).toMatchObject({
+        value: { scopeKey: "org-a:member-a", scopeMismatch: true, scopeChanged: true },
+      });
     }),
   );
 

@@ -8,6 +8,8 @@ export class LoginError extends Data.TaggedError("LoginError")<{ readonly messag
 
 export class BackendCallError extends Data.TaggedError("BackendCallError")<{
   readonly tool: string;
+  readonly retryable?: boolean;
+  readonly category?: "transport" | "schema" | "tool" | "scope_changed";
   readonly message: string;
 }> {}
 

@@ -1,9 +1,27 @@
 {
-  "description": "Recall what Reintersect knows at session start and on the first prompt, and capture the session for server-side extraction.",
+  "description": "Continuously recall task-relevant memory, restore context after compaction, and capture sessions durably.",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "startup|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/dist/reintersect-agent.mjs",
+              "hook",
+              "claudeCode",
+              "session-start"
+            ],
+            "timeout": 20,
+            "statusMessage": "Recalling what Reintersect knows...",
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "resume|compact",
         "hooks": [
           {
             "type": "command",
@@ -39,7 +57,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|SubagentHandback",
         "hooks": [
           {
             "type": "command",
@@ -51,6 +69,23 @@
               "post-tool"
             ],
             "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/dist/reintersect-agent.mjs",
+              "hook",
+              "claudeCode",
+              "background-recall"
+            ],
+            "timeout": 20,
+            "async": true
           }
         ]
       }
@@ -138,6 +173,23 @@
               "session-end"
             ],
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/dist/reintersect-agent.mjs",
+              "hook",
+              "claudeCode",
+              "subagent-start"
+            ],
+            "timeout": 6
           }
         ]
       }

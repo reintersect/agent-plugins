@@ -111,5 +111,11 @@ export const runLogin = (apiUrl: string) =>
       verifier,
     });
 
-    yield* store.writeAuth({ apiUrl, tokenEndpoint: server.token_endpoint, client, tokens });
+    yield* store.writeAuth({
+      credentialId: randomUUID(),
+      apiUrl,
+      tokenEndpoint: server.token_endpoint,
+      client,
+      tokens,
+    });
   });

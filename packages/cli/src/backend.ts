@@ -60,9 +60,12 @@ export class Backend extends Effect.Service<Backend>()("Backend", {
     const bearer = Option.match(apiKey, {
       onSome: (key) => Effect.succeed(Redacted.value(key)),
       onNone: () =>
-        store.readAuth.pipe(
-          Effect.flatMap(freshTokens),
-          Effect.map((tokens) => tokens.access_token),
+        store.withLock(
+          "authentication",
+          store.readAuth.pipe(
+            Effect.flatMap(freshTokens),
+            Effect.map((tokens) => tokens.access_token),
+          ),
         ),
     });
 
@@ -83,7 +86,14 @@ export class Backend extends Effect.Service<Backend>()("Backend", {
 
         return yield* Option.match(Option.fromNullable(response.error), {
           onSome: (error) =>
-            Effect.fail(new BackendCallError({ tool: method, message: error.message })),
+            Effect.fail(
+              new BackendCallError({
+                tool: method,
+                message: error.message,
+                category: "tool",
+                retryable: false,
+              }),
+            ),
           onNone: () =>
             Option.match(Option.fromNullable(response.result), {
               onNone: () =>
@@ -97,14 +107,32 @@ export class Backend extends Effect.Service<Backend>()("Backend", {
             Effect.fail(
               error.response.status === 401
                 ? new NotAuthenticatedError({ message: NOT_SIGNED_IN })
-                : new BackendCallError({ tool: method, message: error.message }),
+                : new BackendCallError({
+                    tool: method,
+                    message: error.message,
+                    category: "transport",
+                    retryable: error.response.status === 429 || error.response.status >= 500,
+                  }),
             ),
           RequestError: (error) =>
-            Effect.fail(new BackendCallError({ tool: method, message: error.message })),
+            Effect.fail(
+              new BackendCallError({
+                tool: method,
+                message: error.message,
+                category: "transport",
+                retryable: true,
+              }),
+            ),
           HttpBodyError: (error) =>
             Effect.fail(new BackendCallError({ tool: method, message: String(error) })),
-          ParseError: (error) =>
-            Effect.fail(new BackendCallError({ tool: method, message: error.message })),
+          ParseError: () =>
+            Effect.fail(
+              new BackendCallError({
+                tool: method,
+                message: "Invalid local data or backend response",
+                category: "schema",
+              }),
+            ),
         }),
       );
 
@@ -143,11 +171,22 @@ export class Backend extends Effect.Service<Backend>()("Backend", {
         Effect.flatMap((response) =>
           response.isError === true
             ? Effect.fail(
-                new BackendCallError({ tool: name, message: JSON.stringify(response.content) }),
+                new BackendCallError({
+                  tool: name,
+                  message: "The backend rejected this operation",
+                  category: JSON.stringify(response.content).includes("CodingSessionScopeChanged")
+                    ? "scope_changed"
+                    : "tool",
+                }),
               )
             : Schema.decodeUnknown(result)(response.structuredContent).pipe(
                 Effect.mapError(
-                  (error) => new BackendCallError({ tool: name, message: error.message }),
+                  () =>
+                    new BackendCallError({
+                      tool: name,
+                      message: "The backend response needs a compatible plugin contract",
+                      category: "schema",
+                    }),
                 ),
               ),
         ),

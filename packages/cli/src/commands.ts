@@ -1,10 +1,11 @@
 import { Array, Console, Effect, Option, Predicate } from "effect";
 import { Backend, hasCredentials } from "#backend";
-import { ApiKey, LOOPBACK_PORTS, trimSlash } from "#config";
+import { ApiKey, CLIENT_VERSION, LOOPBACK_PORTS, trimSlash } from "#config";
 import { LoginError } from "#errors";
+import { healthLines } from "#health";
 import { LoopbackServer, runLogin } from "#login";
 import { WorkspacesResult } from "#schema";
-import { AgentStore } from "#store";
+import { AgentStore, sessionKey } from "#store";
 
 const workspaces = Backend.pipe(
   Effect.flatMap((backend) =>
@@ -85,6 +86,8 @@ export const status = Effect.gen(function* () {
     onNone: () => (signedIn ? "oauth" : "none"),
   });
   const lines = [
+    `Plugin runtime        ${CLIENT_VERSION} (${process.version})`,
+    ...(yield* healthLines),
     `Capture setting       ${paused ? "paused" : "enabled (hook execution not verified)"}`,
     `API                   ${url}`,
     `Authentication        ${authentication}`,
@@ -94,7 +97,7 @@ export const status = Effect.gen(function* () {
     !signedIn && "hint  run the login command, or set REINTERSECT_API_KEY",
     signedIn && Option.isNone(bound) && `hint  the API at ${url} did not answer GetWorkspaces`,
     paused && "hint  capture is paused; run the resume command",
-    pending > 0 && `hint  ${pending} batches are waiting; they retry on the next session start`,
+    pending > 0 && `hint  ${pending} batches are waiting; they retry on subsequent active hooks`,
     Option.isSome(workspace) &&
       "This machine is bound to one workspace. If this repository belongs to another one, call the SetWorkspace tool.",
   ].filter(Predicate.isString);
@@ -103,13 +106,36 @@ export const status = Effect.gen(function* () {
 });
 
 export const setPaused = (paused: boolean) =>
-  AgentStore.pipe(
-    Effect.flatMap((store) => store.setPaused(paused)),
-    Effect.zipRight(
-      Console.log(
-        paused
-          ? "Capture paused. Existing memories stay searchable and pending batches are held, not dropped."
-          : "Capture resumed.",
-      ),
-    ),
-  );
+  Effect.gen(function* () {
+    const store = yield* AgentStore;
+    yield* store.setPaused(paused);
+    if (paused) {
+      yield* Effect.forEach(
+        (yield* store.listStates).filter((name) => name.endsWith(".state.json")),
+        (name) =>
+          Effect.gen(function* () {
+            const state = yield* store.readStateFile(name);
+            if (Option.isNone(state)) return;
+            yield* store.withLock(
+              sessionKey(state.value.host, state.value.sessionId),
+              Effect.gen(function* () {
+                const latest = yield* store.readState(state.value.host, state.value.sessionId);
+                if (Option.isSome(latest))
+                  yield* store.writeState({
+                    ...latest.value,
+                    skipTranscript: true,
+                    transcriptOffset: 0,
+                    transcriptLeafUuid: undefined,
+                  });
+              }),
+            );
+          }),
+        { discard: true },
+      );
+    }
+    yield* Console.log(
+      paused
+        ? "Capture paused. Existing memories stay searchable and pending batches are held, not dropped."
+        : "Capture resumed.",
+    );
+  });

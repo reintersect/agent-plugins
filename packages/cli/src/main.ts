@@ -76,7 +76,11 @@ const program = (argv: ReadonlyArray<string>) => {
   );
 };
 
-const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const errorMessage = (error: unknown) => {
+  if (Schema.is(Schema.Struct({ _tag: Schema.Literal("ParseError") }))(error))
+    return "Invalid local data or backend response; local files were preserved for review.";
+  return error instanceof Error ? error.message : String(error);
+};
 
 export const main = (argv: ReadonlyArray<string>) =>
   program(argv).pipe(

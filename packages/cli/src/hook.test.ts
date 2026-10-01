@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { it } from "@effect/vitest";
 import { Effect, Option } from "effect";
@@ -841,6 +848,148 @@ describe("capture and flush", () => {
         { text: "Second turn while the first upload retries." },
         { text: "Second answer." },
       ]);
+    }),
+  );
+});
+
+describe("recall-only mode", () => {
+  const savedState = (name: string) =>
+    JSON.parse(readFileSync(join(state.home, "sessions", `${name}.state.json`), "utf8"));
+
+  beforeEach(() => {
+    process.env.REINTERSECT_AGENT_RECALL_ONLY = "1";
+  });
+
+  afterEach(() => {
+    delete process.env.REINTERSECT_AGENT_RECALL_ONLY;
+  });
+
+  it.scopedLive("recalls through a session while recording, holding and uploading nothing", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      const start = yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Make the dashboard read through Zero." });
+      yield* claude("post-tool", {
+        tool_name: "Edit",
+        tool_input: { file_path: join(state.repo, "src/app.ts") },
+        tool_response: { success: true },
+      });
+      yield* claude("post-tool-failure", {
+        tool_name: "Bash",
+        tool_input: { command: "pnpm test" },
+        tool_response: "1 failing",
+      });
+      const subagent = yield* claude("subagent-start", { agent_id: "worker-1" });
+      yield* claude("subagent-stop", { agent_type: "Explore", last_assistant_message: "Done." });
+      yield* claude("stop", { last_assistant_message: "Rewired it to Zero." });
+      yield* claude("pre-compact", {});
+      yield* claude("session-end", {});
+
+      const recalls = server.calls.filter((call) => call.name === "RecallForCodingSession");
+      const saved = savedState("claudeCode-s-1");
+
+      expect(JSON.parse(Option.getOrElse(start, () => "{}"))).toEqual({
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: RECALL_BLOCK },
+      });
+      expect(Option.getOrElse(subagent, () => "")).toContain("Zero owns dashboard reads.");
+      expect(recalls).toHaveLength(3);
+      expect(recalls[1]?.arguments.prompt).toContain("Make the dashboard read through Zero.");
+      expect(recalls[2]?.arguments.prompt).toContain("File modified: src/app.ts");
+      expect(recalls[2]?.arguments.prompt).toContain("Failed command: pnpm test");
+      expect(server.calls.some((call) => call.name === "IngestCodingSession")).toBe(false);
+      expect(existsSync(join(state.home, "sessions", "claudeCode-s-1.jsonl"))).toBe(false);
+      expect(saved.heldRecords).toEqual([]);
+      expect(saved.pendingSince).toBeUndefined();
+      expect(existsSync(join(state.home, "pending"))).toBe(false);
+    }),
+  );
+
+  it.scopedLive("keeps Codex command outcomes as recall signals without recording them", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+      const transcript = join(state.home, "codex-recall-only.jsonl");
+      const source = `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "failure",
+            status: "failed",
+            exit_code: 7,
+            aggregated_output: "1 failing",
+          },
+        },
+      })}\n`;
+      writeFileSync(transcript, source);
+      const codex = (event: string, extra: Record<string, unknown>) =>
+        app(
+          runHook(
+            "codex",
+            event,
+            JSON.stringify({
+              session_id: "cx-recall",
+              cwd: state.repo,
+              transcript_path: transcript,
+              ...extra,
+            }),
+          ),
+        );
+
+      yield* codex("user-prompt", { prompt: "Check results." });
+      yield* codex("post-tool", {
+        tool_name: "Bash",
+        tool_use_id: "failure",
+        tool_input: { command: "pnpm test" },
+        tool_response: "plain stdout without an exit code",
+      });
+      yield* codex("stop", { last_assistant_message: "The tests fail." });
+
+      const saved = savedState("codex-cx-recall");
+
+      expect(saved.recentSignals).toEqual(["Failed command: pnpm test 1 failing"]);
+      expect(saved.heldRecords).toEqual([]);
+      expect(saved.transcriptOffset).toBe(Buffer.byteLength(source));
+      expect(existsSync(join(state.home, "sessions", "codex-cx-recall.jsonl"))).toBe(false);
+      expect(server.calls.some((call) => call.name === "IngestCodingSession")).toBe(false);
+    }),
+  );
+
+  it.scopedLive("leaves batches queued by an earlier session untouched", () =>
+    Effect.gen(function* () {
+      yield* backend();
+      mkdirSync(join(state.home, "pending"), { recursive: true });
+      writeFileSync(
+        join(state.home, "pending", "claudeCode-earlier__stop__queued.json"),
+        JSON.stringify({ host: "claudeCode", sessionId: "earlier", reason: "stop" }),
+      );
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Pick up where the last session stopped." });
+      yield* claude("stop", { last_assistant_message: "Picked it up." });
+
+      expect(pendingFiles()).toEqual(["claudeCode-earlier__stop__queued.json"]);
+    }),
+  );
+
+  it.scopedLive("renders no systemMessage when recall fails authentication or uploads wait", () =>
+    Effect.gen(function* () {
+      delete process.env.REINTERSECT_API_KEY;
+      const statePath = join(state.home, "sessions", "claudeCode-s-1.state.json");
+
+      yield* claude("session-start", { source: "startup" });
+      writeFileSync(
+        statePath,
+        JSON.stringify({ ...savedState("claudeCode-s-1"), pendingSince: 0 }),
+      );
+      const output = yield* claude("user-prompt", { prompt: "Why do reads go through Zero?" });
+
+      expect(output).toEqual(Option.none());
+      expect(
+        JSON.parse(readFileSync(join(state.home, "recall", "claudeCode-s-1-main.json"), "utf8")),
+      ).toMatchObject({ failure: "authentication", warned: true });
+      expect(savedState("claudeCode-s-1").queueWarned).toBeUndefined();
     }),
   );
 });

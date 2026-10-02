@@ -26,6 +26,10 @@ export const ApiKey = Config.option(Config.redacted("REINTERSECT_API_KEY")).pipe
 
 export const FlushWorkerBin = Config.option(Config.string("REINTERSECT_AGENT_BIN"));
 
+export const RecallOnly = Config.boolean("REINTERSECT_AGENT_RECALL_ONLY").pipe(
+  Config.withDefault(false),
+);
+
 export const HostProjectDir = Config.string("CLAUDE_PROJECT_DIR").pipe(
   Config.orElse(() => Config.string("CURSOR_PROJECT_DIR")),
   Config.withDefault(process.cwd()),

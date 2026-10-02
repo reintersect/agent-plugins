@@ -109279,6 +109279,7 @@ const AgentHome = option$2(string$3("REINTERSECT_AGENT_HOME"));
 const ApiUrlOverride = option$2(string$3("REINTERSECT_API_URL").pipe(map$4(trimSlash)));
 const ApiKey = option$2(redacted("REINTERSECT_API_KEY")).pipe(map$4(filter$14((key) => value$2(key).trim().length > 0)));
 const FlushWorkerBin = option$2(string$3("REINTERSECT_AGENT_BIN"));
+const RecallOnly = boolean$1("REINTERSECT_AGENT_RECALL_ONLY").pipe(withDefault(false));
 const HostProjectDir = string$3("CLAUDE_PROJECT_DIR").pipe(orElse$5(() => string$3("CURSOR_PROJECT_DIR")), withDefault(process.cwd()));
 const CursorTranscriptPath = option$2(string$3("CURSOR_TRANSCRIPT_PATH"));
 const CodexPluginRoot = option$2(string$3("PLUGIN_ROOT"));
@@ -109945,6 +109946,7 @@ const status = gen(function* () {
 	const store = yield* AgentStore;
 	const backend = yield* Backend;
 	const apiKey = yield* ApiKey;
+	const recallOnly = yield* RecallOnly;
 	const url$3 = yield* backend.apiUrl;
 	const signedIn = yield* hasCredentials;
 	const paused = yield* store.isPaused;
@@ -109962,6 +109964,7 @@ const status = gen(function* () {
 		`Plugin runtime        ${CLIENT_VERSION} (${process.version})`,
 		...yield* healthLines,
 		`Capture setting       ${paused ? "paused" : "enabled (hook execution not verified)"}`,
+		recallOnly && "Recall-only mode      on; hooks recall memory but capture and upload nothing",
 		`API                   ${url$3}`,
 		`Authentication        ${authentication}`,
 		`Workspace             ${match$22(workspace, {
@@ -110976,7 +110979,7 @@ const onSessionStart = (input) => gen(function* () {
 	});
 	return "";
 });
-const onUserPrompt = (input, prompt) => gen(function* () {
+const onUserPrompt = (input, prompt, recallOnly) => gen(function* () {
 	const store = yield* AgentStore;
 	const state = yield* ensureState(input);
 	const text$5 = redactSecrets(prompt).trim();
@@ -110985,17 +110988,18 @@ const onUserPrompt = (input, prompt) => gen(function* () {
 	const git = yield* gitInfo(input.cwd);
 	const changedRepository = state.repository !== void 0 && git.repository !== state.repository;
 	const scopeMismatch = input.host === "claudeCode" || input.host === "codex" || state.scopeMismatch || state.scopeChanged || changedRepository || state.credentialKey !== void 0 && credentialKey !== state.credentialKey;
+	const capturing = !recallOnly && text$5.length > 0;
 	yield* store.appendRecord(input.host, input.sessionId, {
 		kind: "person",
 		observedAt,
 		text: text$5
-	}).pipe(when$5(() => text$5.length > 0 && !scopeMismatch));
+	}).pipe(when$5(() => capturing && !scopeMismatch));
 	yield* store.writeState({
 		...state,
 		...changedRepository ? {} : git,
 		scopeMismatch,
 		scopeChanged: state.scopeChanged || changedRepository,
-		heldRecords: scopeMismatch && text$5 ? [...state.heldRecords, {
+		heldRecords: capturing && scopeMismatch ? [...state.heldRecords, {
 			credentialKey,
 			promptVersion: state.promptVersion + 1,
 			record: {
@@ -111012,11 +111016,11 @@ const onUserPrompt = (input, prompt) => gen(function* () {
 		lastPromptText: text$5,
 		recentSignals: [],
 		lastHookAt: yield* currentTimeMillis,
-		pendingSince: state.pendingSince ?? (yield* currentTimeMillis)
+		pendingSince: recallOnly ? state.pendingSince : state.pendingSince ?? (yield* currentTimeMillis)
 	});
 	return "";
 });
-const onTool = (input, action) => gen(function* () {
+const onTool = (input, action, recallOnly) => gen(function* () {
 	const store = yield* AgentStore;
 	const state = yield* ensureState(input);
 	const capture$1 = yield* gen(function* () {
@@ -111047,7 +111051,7 @@ const onTool = (input, action) => gen(function* () {
 		cwd: input.cwd,
 		observedAt
 	});
-	const captured = yield* captureRecords({
+	const captured = recallOnly ? state : yield* captureRecords({
 		input,
 		state,
 		records
@@ -111060,7 +111064,7 @@ const onTool = (input, action) => gen(function* () {
 	yield* store.writeState({
 		...captured,
 		recentSignals: [...state.recentSignals, ...signals].slice(-6),
-		pendingSince: state.pendingSince ?? (yield* currentTimeMillis),
+		pendingSince: recallOnly ? state.pendingSince : state.pendingSince ?? (yield* currentTimeMillis),
 		lastHookAt: yield* currentTimeMillis
 	});
 	return "";
@@ -111097,7 +111101,7 @@ const transcriptRecords = (input, state, fallback) => gen(function* () {
 	};
 });
 const messageChars = (records) => records.reduce((total, record$2) => total + (record$2.kind === "file" || record$2.kind === "command" ? 0 : record$2.text.length), 0);
-const onAssistantStop = (input, text$5) => gen(function* () {
+const onAssistantStop = (input, text$5, recallOnly) => gen(function* () {
 	const store = yield* AgentStore;
 	const state = yield* ensureState(input);
 	const fallback = redactSecrets(text$5).trim();
@@ -111112,7 +111116,7 @@ const onAssistantStop = (input, text$5) => gen(function* () {
 		observedAt,
 		text: value$4
 	}))));
-	const captured = yield* captureRecords({
+	const captured = recallOnly ? state : yield* captureRecords({
 		input,
 		state,
 		records
@@ -111123,7 +111127,7 @@ const onAssistantStop = (input, text$5) => gen(function* () {
 		...captured,
 		exchanges,
 		pendingChars,
-		pendingSince: state.pendingSince ?? (yield* currentTimeMillis),
+		pendingSince: recallOnly ? state.pendingSince : state.pendingSince ?? (yield* currentTimeMillis),
 		...input.transcriptPath ? { transcriptPath: input.transcriptPath } : {},
 		transcriptOffset: fromTranscript.offset,
 		...fromTranscript.leafUuid ? { transcriptLeafUuid: fromTranscript.leafUuid } : {}
@@ -111151,6 +111155,7 @@ const runHook = (host, event, stdin$3) => gen(function* () {
 	const store = yield* AgentStore;
 	const cwd = yield* HostProjectDir;
 	const transcriptPath = yield* CursorTranscriptPath;
+	const recallOnly = yield* RecallOnly;
 	const input = normalizeHookInput({
 		host,
 		event,
@@ -111163,21 +111168,21 @@ const runHook = (host, event, stdin$3) => gen(function* () {
 	if (yield* store.isPaused) return none$9();
 	if (input.sessionId === "unknown-session") return none$9();
 	const startedAt = yield* currentTimeMillis;
-	yield* store.withLock(sessionKey(host, input.sessionId), value(input.action).pipe(tag("SessionStart", () => onSessionStart(input)), tag("UserPrompt", (action) => onUserPrompt(input, action.prompt)), tag("Tool", (action) => onTool(input, action)), tag("AssistantStop", (action) => onAssistantStop(input, action.text)), tag("SubagentStop", (action) => onSubagentStop(input, action.agentType, action.text)), orElse(() => ensureState(input).pipe(as$8("")))));
+	yield* store.withLock(sessionKey(host, input.sessionId), value(input.action).pipe(tag("SessionStart", () => onSessionStart(input)), tag("UserPrompt", (action) => onUserPrompt(input, action.prompt, recallOnly)), tag("Tool", (action) => onTool(input, action, recallOnly)), tag("AssistantStop", (action) => onAssistantStop(input, action.text, recallOnly)), tag("SubagentStop", (action) => onSubagentStop(input, action.agentType, action.text).pipe(unless(() => recallOnly))), orElse(() => ensureState(input).pipe(as$8("")))));
 	const injecting = [
 		"SessionStart",
 		"UserPrompt",
 		"SubagentStart",
 		"Refresh"
 	].includes(input.action._tag);
-	const flush = input.action._tag === "Flush" || input.action._tag === "AssistantStop" || input.action._tag === "SubagentStop" || input.action._tag === "Refresh";
+	const flush = !recallOnly && (input.action._tag === "Flush" || input.action._tag === "AssistantStop" || input.action._tag === "SubagentStop" || input.action._tag === "Refresh");
 	yield* scheduleFlush({
 		host,
 		sessionId: input.sessionId,
 		reason: event
 	}).pipe(when$5(() => flush), ignore);
-	yield* recoverPending.pipe(when$5(() => injecting || flush), ignore);
-	const warning = yield* queueWarning(input).pipe(when$5(() => injecting && input.action._tag !== "Refresh"), orElseSucceed$2(() => none$9()));
+	yield* recoverPending.pipe(when$5(() => !recallOnly && (injecting || flush)), ignore);
+	const warning = yield* queueWarning(input).pipe(when$5(() => !recallOnly && injecting && input.action._tag !== "Refresh"), orElseSucceed$2(() => none$9()));
 	const output = yield* if_(injecting, {
 		onTrue: () => recall(input, startedAt),
 		onFalse: () => succeed$14({
@@ -111185,7 +111190,7 @@ const runHook = (host, event, stdin$3) => gen(function* () {
 			warning: void 0
 		})
 	});
-	return renderHookOutput(host, event, output.context, output.warning ?? getOrUndefined(warning));
+	return renderHookOutput(host, event, output.context, recallOnly ? void 0 : output.warning ?? getOrUndefined(warning));
 }).pipe(timeoutOption(event === "background-recall" || event === "session-start" || event === "sessionStart" ? "19 seconds" : "4 seconds"), map$13(flatten$18), catchAll$10((error$2) => AgentStore.pipe(flatMap$9((store) => store.logError(`hook ${host} ${event}`, error$2).pipe(ignore)), as$8(none$9()))));
 
 //#endregion

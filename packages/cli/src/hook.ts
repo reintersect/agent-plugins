@@ -2,7 +2,7 @@ import { Array, Clock, DateTime, Effect, Match, Option, Schema } from "effect";
 import { Backend } from "#backend";
 import { recordsFromTool } from "#capture";
 import { captureRecords } from "#captureRecords";
-import { CursorTranscriptPath, HostProjectDir } from "#config";
+import { CursorTranscriptPath, HostProjectDir, RecallOnly } from "#config";
 import { recoverPending, scheduleFlush } from "#flush";
 import { gitInfo } from "#git";
 import { queueWarning } from "#health";
@@ -74,7 +74,7 @@ const onSessionStart = (input: HookInput) =>
     return "";
   });
 
-const onUserPrompt = (input: HookInput, prompt: string) =>
+const onUserPrompt = (input: HookInput, prompt: string, recallOnly: boolean) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
@@ -91,17 +91,18 @@ const onUserPrompt = (input: HookInput, prompt: string) =>
       state.scopeChanged ||
       changedRepository ||
       (state.credentialKey !== undefined && credentialKey !== state.credentialKey);
+    const capturing = !recallOnly && text.length > 0;
 
     yield* store
       .appendRecord(input.host, input.sessionId, { kind: "person", observedAt, text })
-      .pipe(Effect.when(() => text.length > 0 && !scopeMismatch));
+      .pipe(Effect.when(() => capturing && !scopeMismatch));
     yield* store.writeState({
       ...state,
       ...(changedRepository ? {} : git),
       scopeMismatch,
       scopeChanged: state.scopeChanged || changedRepository,
       heldRecords:
-        scopeMismatch && text
+        capturing && scopeMismatch
           ? [
               ...state.heldRecords,
               {
@@ -119,12 +120,18 @@ const onUserPrompt = (input: HookInput, prompt: string) =>
       lastPromptText: text,
       recentSignals: [],
       lastHookAt: yield* Clock.currentTimeMillis,
-      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
+      pendingSince: recallOnly
+        ? state.pendingSince
+        : (state.pendingSince ?? (yield* Clock.currentTimeMillis)),
     });
     return "";
   });
 
-const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>) =>
+const onTool = (
+  input: HookInput,
+  action: Extract<HookAction, { _tag: "Tool" }>,
+  recallOnly: boolean,
+) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
@@ -168,7 +175,7 @@ const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>)
     const observedAt = yield* isoNow;
     const records = recordsFromTool({ ...capture.value, cwd: input.cwd, observedAt });
 
-    const captured = yield* captureRecords({ input, state, records });
+    const captured = recallOnly ? state : yield* captureRecords({ input, state, records });
     const signals = records.flatMap((record) => {
       if (record.kind === "file") return [`File ${record.action}: ${record.path}`];
       if (record.kind === "command" && record.failed)
@@ -178,7 +185,9 @@ const onTool = (input: HookInput, action: Extract<HookAction, { _tag: "Tool" }>)
     yield* store.writeState({
       ...captured,
       recentSignals: [...state.recentSignals, ...signals].slice(-6),
-      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
+      pendingSince: recallOnly
+        ? state.pendingSince
+        : (state.pendingSince ?? (yield* Clock.currentTimeMillis)),
       lastHookAt: yield* Clock.currentTimeMillis,
     });
 
@@ -238,7 +247,7 @@ const messageChars = (records: ReadonlyArray<CaptureRecord>) =>
     0,
   );
 
-const onAssistantStop = (input: HookInput, text: string) =>
+const onAssistantStop = (input: HookInput, text: string, recallOnly: boolean) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
 
@@ -264,7 +273,7 @@ const onAssistantStop = (input: HookInput, text: string) =>
           ),
         );
 
-    const captured = yield* captureRecords({ input, state, records });
+    const captured = recallOnly ? state : yield* captureRecords({ input, state, records });
 
     const exchanges = state.exchanges + 1;
     const pendingChars = state.pendingChars + messageChars(records);
@@ -273,7 +282,9 @@ const onAssistantStop = (input: HookInput, text: string) =>
       ...captured,
       exchanges,
       pendingChars,
-      pendingSince: state.pendingSince ?? (yield* Clock.currentTimeMillis),
+      pendingSince: recallOnly
+        ? state.pendingSince
+        : (state.pendingSince ?? (yield* Clock.currentTimeMillis)),
       ...(input.transcriptPath ? { transcriptPath: input.transcriptPath } : {}),
       transcriptOffset: fromTranscript.offset,
       ...(fromTranscript.leafUuid ? { transcriptLeafUuid: fromTranscript.leafUuid } : {}),
@@ -316,6 +327,7 @@ export const runHook = (host: Host, event: string, stdin: string) =>
     const store = yield* AgentStore;
     const cwd = yield* HostProjectDir;
     const transcriptPath = yield* CursorTranscriptPath;
+    const recallOnly = yield* RecallOnly;
 
     const input = normalizeHookInput({
       host,
@@ -333,10 +345,14 @@ export const runHook = (host: Host, event: string, stdin: string) =>
       sessionKey(host, input.sessionId),
       Match.value(input.action).pipe(
         Match.tag("SessionStart", () => onSessionStart(input)),
-        Match.tag("UserPrompt", (action) => onUserPrompt(input, action.prompt)),
-        Match.tag("Tool", (action) => onTool(input, action)),
-        Match.tag("AssistantStop", (action) => onAssistantStop(input, action.text)),
-        Match.tag("SubagentStop", (action) => onSubagentStop(input, action.agentType, action.text)),
+        Match.tag("UserPrompt", (action) => onUserPrompt(input, action.prompt, recallOnly)),
+        Match.tag("Tool", (action) => onTool(input, action, recallOnly)),
+        Match.tag("AssistantStop", (action) => onAssistantStop(input, action.text, recallOnly)),
+        Match.tag("SubagentStop", (action) =>
+          onSubagentStop(input, action.agentType, action.text).pipe(
+            Effect.unless(() => recallOnly),
+          ),
+        ),
         Match.orElse(() => ensureState(input).pipe(Effect.as(""))),
       ),
     );
@@ -345,21 +361,22 @@ export const runHook = (host: Host, event: string, stdin: string) =>
       input.action._tag,
     );
     const flush =
-      input.action._tag === "Flush" ||
-      input.action._tag === "AssistantStop" ||
-      input.action._tag === "SubagentStop" ||
-      input.action._tag === "Refresh";
+      !recallOnly &&
+      (input.action._tag === "Flush" ||
+        input.action._tag === "AssistantStop" ||
+        input.action._tag === "SubagentStop" ||
+        input.action._tag === "Refresh");
 
     yield* scheduleFlush({ host, sessionId: input.sessionId, reason: event }).pipe(
       Effect.when(() => flush),
       Effect.ignore,
     );
     yield* recoverPending.pipe(
-      Effect.when(() => injecting || flush),
+      Effect.when(() => !recallOnly && (injecting || flush)),
       Effect.ignore,
     );
     const warning = yield* queueWarning(input).pipe(
-      Effect.when(() => injecting && input.action._tag !== "Refresh"),
+      Effect.when(() => !recallOnly && injecting && input.action._tag !== "Refresh"),
       Effect.orElseSucceed(() => Option.none<string>()),
     );
     const output = yield* Effect.if(injecting, {
@@ -370,7 +387,7 @@ export const runHook = (host: Host, event: string, stdin: string) =>
       host,
       event,
       output.context,
-      output.warning ?? Option.getOrUndefined(warning),
+      recallOnly ? undefined : (output.warning ?? Option.getOrUndefined(warning)),
     );
   }).pipe(
     Effect.timeoutOption(

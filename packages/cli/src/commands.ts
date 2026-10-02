@@ -1,6 +1,6 @@
 import { Array, Console, Effect, Option, Predicate } from "effect";
 import { Backend, hasCredentials } from "#backend";
-import { ApiKey, CLIENT_VERSION, LOOPBACK_PORTS, trimSlash } from "#config";
+import { ApiKey, CLIENT_VERSION, LOOPBACK_PORTS, RecallOnly, trimSlash } from "#config";
 import { LoginError } from "#errors";
 import { healthLines } from "#health";
 import { LoopbackServer, runLogin } from "#login";
@@ -68,6 +68,7 @@ export const status = Effect.gen(function* () {
   const store = yield* AgentStore;
   const backend = yield* Backend;
   const apiKey = yield* ApiKey;
+  const recallOnly = yield* RecallOnly;
 
   const url = yield* backend.apiUrl;
   const signedIn = yield* hasCredentials;
@@ -89,6 +90,7 @@ export const status = Effect.gen(function* () {
     `Plugin runtime        ${CLIENT_VERSION} (${process.version})`,
     ...(yield* healthLines),
     `Capture setting       ${paused ? "paused" : "enabled (hook execution not verified)"}`,
+    recallOnly && "Recall-only mode      on; hooks recall memory but capture and upload nothing",
     `API                   ${url}`,
     `Authentication        ${authentication}`,
     `Workspace             ${Option.match(workspace, { onNone: () => "unknown", onSome: (entry) => entry.name || entry.id })}`,

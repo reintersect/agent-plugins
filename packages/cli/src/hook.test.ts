@@ -12,10 +12,15 @@ import { it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { afterEach, beforeEach, describe, expect } from "vitest";
 import { setPaused } from "#commands";
-import { runFlush } from "#flush";
+import { BATCH_MAX_AGE_MS, BATCH_MAX_BYTES, runFlush } from "#flush";
 import { runHook } from "#hook";
 import { AgentStore } from "#store";
-import { type FakeBackendOptions, fakeBackend, type RecordedCall } from "#testing/fakeBackend";
+import {
+  type FakeBackend,
+  type FakeBackendOptions,
+  fakeBackend,
+  type RecordedCall,
+} from "#testing/fakeBackend";
 import { app, makeAgentHome, makeGitRepo } from "#testing/harness";
 
 const ALL_TOOLS = ["RecallForCodingSession", "IngestCodingSession", "SearchMemories"];
@@ -848,6 +853,247 @@ describe("capture and flush", () => {
         { text: "Second turn while the first upload retries." },
         { text: "Second answer." },
       ]);
+    }),
+  );
+});
+
+describe("batched uploads", () => {
+  const statePath = () => join(state.home, "sessions", "claudeCode-s-1.state.json");
+
+  const patchState = (patch: Record<string, unknown>) =>
+    writeFileSync(
+      statePath(),
+      JSON.stringify({ ...JSON.parse(readFileSync(statePath(), "utf8")), ...patch }),
+    );
+
+  const ingests = (server: FakeBackend) =>
+    server.calls.filter((call) => call.name === "IngestCodingSession");
+
+  const edit = (path: string) =>
+    claude("post-tool", {
+      tool_name: "Edit",
+      tool_input: { file_path: join(state.repo, path) },
+      tool_response: { success: true },
+    });
+
+  it.scopedLive("keeps a small, fresh batch local through tool work", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Make the dashboard read through Zero." });
+      yield* edit("src/app.ts");
+      yield* claude("background-recall", { tool_name: "Edit" });
+
+      expect(sessionLog()).toContain("src/app.ts");
+      expect(pendingFiles()).toEqual([]);
+      expect(ingests(server)).toHaveLength(0);
+    }),
+  );
+
+  it.scopedLive("ships tool work once the oldest unsent capture reaches the age bound", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Run the long migration." });
+      patchState({ pendingSince: Date.now() - BATCH_MAX_AGE_MS });
+      yield* edit("src/migration.ts");
+      yield* app(runFlush(pendingPath("post-tool")));
+
+      const calls = ingests(server);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.arguments.final).toBeUndefined();
+      expect(calls[0]?.arguments.events).toMatchObject([
+        { role: "person", text: "Run the long migration." },
+        { role: "evidence", text: "Files modified:\n- src/migration.ts" },
+      ]);
+      expect(pendingFiles()).toEqual([]);
+    }),
+  );
+
+  it.scopedLive("ships tool work once the unsent capture reaches the size bound", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Context ".repeat(BATCH_MAX_BYTES / 8) });
+      yield* edit("src/large.ts");
+      yield* app(runFlush(pendingPath("post-tool")));
+
+      expect(ingests(server)).toHaveLength(1);
+      expect(pendingFiles()).toEqual([]);
+    }),
+  );
+
+  it.scopedLive("ships each subagent result and turn without marking it final", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Explore the repository." });
+      yield* edit("src/explore.ts");
+      yield* claude("subagent-stop", {
+        agent_type: "Explore",
+        last_assistant_message: "Found it.",
+      });
+      yield* app(runFlush(pendingPath("subagent-stop")));
+      yield* claude("stop", { last_assistant_message: "Done exploring." });
+      yield* app(runFlush(pendingPath("stop")));
+
+      const calls = ingests(server);
+
+      expect(calls.map((call) => call.arguments.final)).toEqual([undefined, undefined]);
+      expect(calls[1]?.arguments.events).toMatchObject([
+        { role: "agent", text: "Done exploring." },
+      ]);
+      expect(pendingFiles()).toEqual([]);
+    }),
+  );
+
+  it.scopedLive("marks compaction and session-end uploads final", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Rename the store." });
+      yield* edit("src/store.ts");
+      yield* claude("pre-compact", { trigger: "auto" });
+      yield* app(runFlush(pendingPath("pre-compact")));
+      yield* claude("user-prompt", { prompt: "Now ship it." });
+      yield* claude("session-end", {});
+      yield* app(runFlush(pendingPath("session-end")));
+
+      const calls = ingests(server);
+
+      expect(calls.map((call) => call.arguments.final)).toEqual([true, true]);
+      expect(calls[1]?.arguments.events).toMatchObject([{ role: "person", text: "Now ship it." }]);
+    }),
+  );
+
+  it.scopedLive("makes no upload at session end when the last turn already shipped", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Tidy the imports." });
+      yield* claude("stop", { last_assistant_message: "Tidied." });
+      yield* app(runFlush(pendingPath("stop")));
+      yield* claude("session-end", {});
+
+      expect(ingests(server).map((call) => call.arguments.final)).toEqual([undefined]);
+      expect(pendingFiles()).toEqual([]);
+      expect(JSON.parse(readFileSync(statePath(), "utf8")).pendingSince).toBeUndefined();
+    }),
+  );
+
+  it.scopedLive("marks a Cursor session end final", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+      const cursor = (event: string, extra: Record<string, unknown>) =>
+        app(
+          runHook(
+            "cursor",
+            event,
+            JSON.stringify({ conversation_id: "cur-1", workspace_roots: [state.repo], ...extra }),
+          ),
+        );
+
+      yield* cursor("sessionStart", {});
+      yield* cursor("beforeSubmitPrompt", { prompt: "Fix the flaky test." });
+      yield* cursor("afterFileEdit", { file_path: join(state.repo, "src/flaky.test.ts") });
+
+      expect(pendingFiles()).toEqual([]);
+
+      yield* cursor("sessionEnd", {});
+      yield* app(runFlush(pendingPath("sessionEnd")));
+
+      expect(ingests(server)[0]?.arguments).toMatchObject({ host: "cursor", final: true });
+    }),
+  );
+
+  it.scopedLive("carries a final request past an upload already in flight", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      yield* claude("user-prompt", { prompt: "Finish the release notes." });
+      yield* claude("stop", { last_assistant_message: "Drafted them." });
+      yield* edit("NOTES.md");
+      yield* claude("session-end", {});
+
+      expect(pendingFiles().some((name) => name.includes("session-end"))).toBe(false);
+
+      yield* app(runFlush(pendingPath("stop")));
+      yield* app(runFlush(pendingPath("continued")));
+
+      const calls = ingests(server);
+
+      expect(calls.map((call) => call.arguments.final)).toEqual([undefined, true]);
+      expect(calls[1]?.arguments.events).toMatchObject([
+        { role: "evidence", text: "Files modified:\n- NOTES.md" },
+      ]);
+      expect(pendingFiles()).toEqual([]);
+    }),
+  );
+
+  it.scopedLive("marks only the last chunk of a large final batch", () =>
+    Effect.gen(function* () {
+      const server = yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+
+      const file = join(state.home, "pending", "claudeCode-s-1__session-end__large.running");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          host: "claudeCode",
+          sessionId: "s-1",
+          reason: "session-end",
+          final: true,
+          snapshot: {
+            events: Array.from({ length: 201 }, (_, seq) => ({
+              seq,
+              role: "agent",
+              text: `Step ${seq}`,
+              observedAt: "2026-05-12T10:00:00.000Z",
+            })),
+            throughRecord: 0,
+            nextSeq: 201,
+            scopeKey: DEFAULT_RECALL.scopeKey,
+            apiUrl: server.url,
+          },
+        }),
+      );
+      yield* app(runFlush(file));
+
+      expect(
+        ingests(server).map((call) => [
+          (call.arguments.events as unknown[]).length,
+          call.arguments.final,
+        ]),
+      ).toEqual([
+        [200, undefined],
+        [1, true],
+      ]);
+    }),
+  );
+
+  it.scopedLive("warns about a stuck upload but not about work inside its batch window", () =>
+    Effect.gen(function* () {
+      yield* backend();
+
+      yield* claude("session-start", { source: "startup" });
+      patchState({ pendingSince: Date.now() - BATCH_MAX_AGE_MS - 60_000 });
+      const quiet = yield* claude("subagent-start", { agent_id: "worker-1" });
+      patchState({ lastFlushAt: Date.now() - 6 * 60_000, lastUploadAt: Date.now() - 7 * 60_000 });
+      const warned = yield* claude("subagent-start", { agent_id: "worker-2" });
+
+      expect(JSON.parse(Option.getOrElse(quiet, () => "{}")).systemMessage).toBeUndefined();
+      expect(JSON.parse(Option.getOrElse(warned, () => "{}")).systemMessage).toContain(
+        "waiting more than five minutes",
+      );
     }),
   );
 });

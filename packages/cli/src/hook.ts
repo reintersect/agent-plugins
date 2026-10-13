@@ -11,7 +11,7 @@ import { currentCredentialKey } from "#identity";
 import { nativeCommandResult } from "#nativeCommand";
 import { recall } from "#recall";
 import { redactSecrets } from "#redact";
-import type { CaptureRecord, Host, SessionState } from "#schema";
+import type { CaptureRecord, FlushTrigger, Host, SessionState } from "#schema";
 import { AgentStore, sessionKey } from "#store";
 import {
   codexCommandResult,
@@ -360,19 +360,24 @@ export const runHook = (host: Host, event: string, stdin: string) =>
     const injecting = ["SessionStart", "UserPrompt", "SubagentStart", "Refresh"].includes(
       input.action._tag,
     );
-    const flush =
-      !recallOnly &&
-      (input.action._tag === "Flush" ||
-        input.action._tag === "AssistantStop" ||
-        input.action._tag === "SubagentStop" ||
-        input.action._tag === "Refresh");
+    const trigger = recallOnly
+      ? Option.none<FlushTrigger>()
+      : Match.value(input.action).pipe(
+          Match.tag("Flush", () => Option.some<FlushTrigger>("final")),
+          Match.tag("AssistantStop", "SubagentStop", () => Option.some<FlushTrigger>("boundary")),
+          Match.tag("Tool", "Refresh", () => Option.some<FlushTrigger>("backstop")),
+          Match.orElse(() => Option.none<FlushTrigger>()),
+        );
 
-    yield* scheduleFlush({ host, sessionId: input.sessionId, reason: event }).pipe(
-      Effect.when(() => flush),
-      Effect.ignore,
-    );
+    yield* Effect.forEach(
+      Option.toArray(trigger),
+      (value) => scheduleFlush({ host, sessionId: input.sessionId, reason: event, trigger: value }),
+      { discard: true },
+    ).pipe(Effect.ignore);
     yield* recoverPending.pipe(
-      Effect.when(() => !recallOnly && (injecting || flush)),
+      Effect.when(
+        () => !recallOnly && (injecting || Option.exists(trigger, (value) => value !== "backstop")),
+      ),
       Effect.ignore,
     );
     const warning = yield* queueWarning(input).pipe(

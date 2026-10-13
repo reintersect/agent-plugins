@@ -10,8 +10,11 @@ pnpm test:native
 
 `pnpm check` covers host normalization, capture, full-message splitting, revision deltas,
 compaction, subagents, account changes, immutable retries, pause, storage concurrency,
-corrupt-file preservation, and Cursor/OpenCode regressions. Generated bundles and skills
-must match a fresh build.
+corrupt-file preservation, and Cursor/OpenCode regressions. It also covers upload batching:
+tool work stays local until a turn or subagent ends, compaction, session end, or the age
+(five minutes) and size (64 KiB) backstop; compaction and session-end uploads carry `final`
+on their last chunk, including when they wait behind an upload already in flight. Generated
+bundles and skills must match a fresh build.
 
 `pnpm test:native` requires Claude Code 2.1.283+ and Codex 0.158.0+ on PATH. It creates
 isolated temporary host configuration, a synthetic repository, and local MCP/model APIs.
@@ -43,8 +46,16 @@ Repository resolver tests distinguish a verified missing repository from a looku
 The matching backend change passed full CI in Reintersect PR #1833: build, lint,
 typechecks, unit tests, and all eight E2E shards. Focused backend tests also passed
 with fixture layers. Local browser repetitions verified the CI fixture repairs in
-its prerequisite PR #1834. Production extraction latency and the few-minute
-freshness target have not been measured by these fixture checks.
+its prerequisite PR #1834. Production extraction latency has not been measured by these
+fixture checks.
+
+The batching backend change adds the optional `final` argument to `IngestCodingSession` and
+debounces extraction until a session has been quiet for ten minutes, with a one-hour cap,
+extracting immediately on `final`. The plugin's five-minute backstop stays inside that quiet
+window, so a long turn is not extracted once per upload. Backends without `final` decode tool
+arguments with unknown keys ignored, so the plugin sends it without a compatibility fallback.
+A compaction or session end that finds nothing unsent makes no upload and sends no `final`;
+extraction then follows the quiet-window schedule.
 
 ## Release and recovery
 

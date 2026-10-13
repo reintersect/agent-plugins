@@ -2,15 +2,21 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { FileSystem, Path } from "@effect/platform";
-import { Array, Clock, Effect, Option, Schedule, Schema } from "effect";
+import { Array, Clock, DateTime, Effect, Option, Schedule, Schema } from "effect";
 import { Backend } from "#backend";
 import { renderEvidence } from "#capture";
 import { FlushWorkerBin, MAX_MESSAGE_CHARS } from "#config";
 import { BackendCallError } from "#errors";
-import type { CaptureRecord, Handoff, IngestEvent } from "#schema";
+import type { CaptureRecord, FlushTrigger, Handoff, Host, IngestEvent } from "#schema";
 import { AgentStore, sessionKey } from "#store";
 
 export const STALE_RUNNING_MS = 5 * 60 * 1_000;
+
+export const BATCH_MAX_AGE_MS = 5 * 60 * 1_000;
+
+export const BATCH_MAX_BYTES = 64 * 1_024;
+
+const TRIGGER_RANK: Record<FlushTrigger, number> = { backstop: 0, boundary: 1, final: 2 };
 
 const PENDING_LAUNCH_LIMIT = 5;
 
@@ -66,19 +72,26 @@ export const launchHandoff = (path: string) =>
     });
   });
 
-export const scheduleFlush = (handoff: Handoff) =>
+interface FlushRequest {
+  readonly host: Host;
+  readonly sessionId: string;
+  readonly reason: string;
+  readonly trigger: FlushTrigger;
+}
+
+export const scheduleFlush = ({ host, sessionId, reason, trigger }: FlushRequest) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
     const path = yield* Path.Path;
 
     if (yield* store.isPaused) return;
 
-    const key = sessionKey(handoff.host, handoff.sessionId);
+    const key = sessionKey(host, sessionId);
     const file = yield* store.withLock(
       key,
       Effect.gen(function* () {
         const pending = yield* store.listPending;
-        const state = yield* store.readState(handoff.host, handoff.sessionId);
+        const state = yield* store.readState(host, sessionId);
 
         if (
           Option.isNone(state) ||
@@ -87,36 +100,65 @@ export const scheduleFlush = (handoff: Handoff) =>
           state.value.scopeKey === undefined
         )
           return Option.none<string>();
-        if (pending.some((name) => name.startsWith(`${key}__`))) return Option.none<string>();
+
+        const current = state.value;
+        const deferred = current.deferredFlush;
+        const effective =
+          deferred !== undefined && TRIGGER_RANK[deferred] > TRIGGER_RANK[trigger]
+            ? deferred
+            : trigger;
+
+        if (pending.some((name) => name.startsWith(`${key}__`))) {
+          if (effective !== "backstop" && effective !== current.deferredFlush)
+            yield* store.writeState({ ...current, deferredFlush: effective });
+          return Option.none<string>();
+        }
 
         const now = yield* Clock.currentTimeMillis;
-        if (
-          handoff.reason === "background-recall" &&
-          state.value.lastFlushAt !== undefined &&
-          now - state.value.lastFlushAt < 60_000
-        )
+        const logBytes = yield* store.recordBytes(host, sessionId);
+        const due =
+          effective !== "backstop" ||
+          logBytes - (current.snapshotBytes ?? 0) >= BATCH_MAX_BYTES ||
+          (current.pendingSince !== undefined && now - current.pendingSince >= BATCH_MAX_AGE_MS);
+
+        if (!due) return Option.none<string>();
+
+        const records = yield* store.readRecords(host, sessionId);
+        const events = buildEvents(records, current.flushedRecords, current.nextSeq);
+
+        if (events.length === 0) {
+          yield* store.writeState({
+            ...current,
+            snapshotBytes: logBytes,
+            deferredFlush: undefined,
+            pendingSince: current.heldRecords.length > 0 ? current.pendingSince : undefined,
+          });
           return Option.none<string>();
+        }
 
-        const records = yield* store.readRecords(handoff.host, handoff.sessionId);
-        const events = buildEvents(records, state.value.flushedRecords, state.value.nextSeq);
-
-        if (events.length === 0) return Option.none<string>();
-
-        const file = path.join(store.pendingDir, `${key}__${handoff.reason}__${randomUUID()}.json`);
+        const file = path.join(store.pendingDir, `${key}__${reason}__${randomUUID()}.json`);
         yield* store.writeHandoff(file, {
-          ...handoff,
+          host,
+          sessionId,
+          reason,
+          ...(effective === "final" ? { final: true } : {}),
           snapshot: {
             events,
             throughRecord: records.length,
-            nextSeq: state.value.nextSeq + events.length,
-            repository: state.value.repository,
-            branch: state.value.branch,
-            scopeKey: state.value.scopeKey,
-            apiUrl: state.value.apiUrl,
-            credentialKey: state.value.credentialKey,
+            nextSeq: current.nextSeq + events.length,
+            repository: current.repository,
+            branch: current.branch,
+            scopeKey: current.scopeKey,
+            apiUrl: current.apiUrl,
+            credentialKey: current.credentialKey,
           },
         });
-        yield* store.writeState({ ...state.value, lastFlushAt: now });
+        yield* store.writeState({
+          ...current,
+          lastFlushAt: now,
+          snapshotBytes: logBytes,
+          deferredFlush: undefined,
+        });
         return Option.some(file);
       }),
     );
@@ -176,9 +218,10 @@ const ingest = (handoff: Handoff & { snapshot: NonNullable<Handoff["snapshot"]> 
         category: "scope_changed",
       });
     }
+    const chunks = Array.chunksOf(snapshot.events, INGEST_BATCH_LIMIT);
     yield* Effect.forEach(
-      Array.chunksOf(snapshot.events, INGEST_BATCH_LIMIT),
-      (events) =>
+      chunks,
+      (events, index) =>
         Effect.gen(function* () {
           if ((yield* store.isPaused) || snapshot.apiUrl !== (yield* backend.apiUrl)) {
             return yield* new BackendCallError({
@@ -195,6 +238,7 @@ const ingest = (handoff: Handoff & { snapshot: NonNullable<Handoff["snapshot"]> 
               branch: snapshot.branch,
               scopeKey: snapshot.scopeKey,
               events,
+              ...(handoff.final === true && index === chunks.length - 1 ? { final: true } : {}),
             },
             "Shipping a captured local coding session to Reintersect so it can extract memories",
             Schema.Unknown,
@@ -267,12 +311,20 @@ export const runFlush = (path: string) =>
             const remaining = (yield* store.readRecords(handoff.host, handoff.sessionId)).slice(
               snapshot.value.throughRecord,
             );
+            const oldestRemaining = Array.head(remaining).pipe(
+              Option.map((record) =>
+                DateTime.make(record.observedAt).pipe(
+                  Option.map(DateTime.toEpochMillis),
+                  Option.getOrElse(() => now),
+                ),
+              ),
+            );
             yield* store.writeState({
               ...current.value,
               flushedRecords: Math.max(current.value.flushedRecords, snapshot.value.throughRecord),
               nextSeq: Math.max(current.value.nextSeq, snapshot.value.nextSeq),
               lastUploadAt: now,
-              pendingSince: remaining.length > 0 ? current.value.pendingSince : undefined,
+              pendingSince: Option.getOrUndefined(oldestRemaining),
               queueWarned: false,
             });
             yield* fs.remove(path);
@@ -286,6 +338,7 @@ export const runFlush = (path: string) =>
       host: handoff.host,
       sessionId: handoff.sessionId,
       reason: "continued",
+      trigger: "backstop",
     }).pipe(Effect.when(() => completed));
   }).pipe(
     Effect.catchAll((error) =>

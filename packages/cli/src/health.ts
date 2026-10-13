@@ -1,7 +1,10 @@
 import { Path } from "@effect/platform";
 import { Clock, Effect, Option } from "effect";
+import { BATCH_MAX_AGE_MS } from "#flush";
 import type { HookInput } from "#hostEvents";
 import { AgentStore, sessionKey } from "#store";
+
+const QUEUE_WARNING_MS = 5 * 60 * 1_000;
 
 export const queueWarning = (input: HookInput) =>
   Effect.gen(function* () {
@@ -11,13 +14,17 @@ export const queueWarning = (input: HookInput) =>
       Effect.gen(function* () {
         const state = yield* store.readState(input.host, input.sessionId);
         const now = yield* Clock.currentTimeMillis;
-        if (
-          Option.isNone(state) ||
-          state.value.queueWarned ||
-          state.value.pendingSince === undefined ||
-          now - state.value.pendingSince < 300_000
-        )
-          return undefined;
+        if (Option.isNone(state) || state.value.queueWarned) return undefined;
+
+        const { lastFlushAt, lastUploadAt, pendingSince } = state.value;
+        const undelivered =
+          lastFlushAt !== undefined &&
+          lastFlushAt > (lastUploadAt ?? 0) &&
+          now - lastFlushAt >= QUEUE_WARNING_MS;
+        const unbatched =
+          pendingSince !== undefined && now - pendingSince >= BATCH_MAX_AGE_MS + QUEUE_WARNING_MS;
+
+        if (!undelivered && !unbatched) return undefined;
 
         yield* store.writeState({ ...state.value, queueWarned: true });
         return "Reintersect has captured work waiting more than five minutes to upload. It is retained locally. Run the Reintersect status skill for recovery steps.";

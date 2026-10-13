@@ -109315,6 +109315,7 @@ const CommandRecord = Struct({
 	output: optional(String$)
 });
 const CaptureRecord = Union(MessageRecord, FileRecord, CommandRecord);
+const FlushTrigger = Literal("backstop", "boundary", "final");
 const SessionState = Struct({
 	host: Host,
 	sessionId: String$,
@@ -109341,6 +109342,8 @@ const SessionState = Struct({
 	lastHookAt: optional(Number$),
 	lastUploadAt: optional(Number$),
 	lastFlushAt: optional(Number$),
+	snapshotBytes: optional(Number$),
+	deferredFlush: optional(Literal("boundary", "final")),
 	pendingSince: optional(Number$),
 	queueWarned: optional(Boolean$),
 	heldRecords: optionalWith(Array$(Struct({
@@ -109360,6 +109363,7 @@ const Handoff = Struct({
 	host: Host,
 	sessionId: String$,
 	reason: String$,
+	final: optional(Boolean$),
 	snapshot: optional(Struct({
 		events: Array$(IngestEvent),
 		throughRecord: Number$,
@@ -109651,6 +109655,7 @@ var AgentStore = class extends Service()("AgentStore", {
 			writeState: (state) => writeJson(SessionState, statePath(state.host, state.sessionId), state),
 			appendRecord: (host, sessionId, record$2) => encode$1(parseJson(CaptureRecord))(record$2).pipe(flatMap$9((line) => appendLine(logPath(host, sessionId), line))),
 			readRecords: (host, sessionId) => fs$2.readFileString(logPath(host, sessionId)).pipe(flatMap$9((text$5) => forEach$3(text$5.split("\n").filter((line) => line.trim()), (line) => decodeRecord(line))), catchTag$6("SystemError", (error$2) => error$2.reason === "NotFound" ? succeed$14(empty$48()) : fail$12(error$2))),
+			recordBytes: (host, sessionId) => fs$2.stat(logPath(host, sessionId)).pipe(map$13((info$2) => Number(info$2.size)), catchTag$6("SystemError", (error$2) => error$2.reason === "NotFound" ? succeed$14(0) : fail$12(error$2))),
 			isPaused: fs$2.exists(pausedPath),
 			setPaused: (paused) => paused ? ensureDir(home).pipe(zipRight$9(fs$2.writeFileString(pausedPath, ""))) : fs$2.remove(pausedPath, { force: true }),
 			logError: (scope$4, error$2) => now.pipe(flatMap$9((now$2) => appendLine(errorLogPath, `${formatIso(now$2)} ${scope$4}: ${error$2 instanceof Error ? error$2.name : "operation failed"}`))),
@@ -109799,13 +109804,405 @@ const hasCredentials = gen(function* () {
 });
 
 //#endregion
+//#region src/git.ts
+const GIT_TIMEOUT = millis(500);
+const run = (cwd, args$1) => string$1(make$7("git", "-C", cwd, ...args$1)).pipe(timeout$2(GIT_TIMEOUT), map$13((text$5) => liftPredicate$2(text$5.trim(), isNonEmpty$1)), orElseSucceed$2(() => none$9()));
+const parseRepositoryFullName = (remote) => fromNullable$2(remote.trim().replace(/\.git$/, "").match(/[/:]([^/:\s]+)\/([^/\s]+)$/)).pipe(map$31((match$24) => `${match$24[1]}/${match$24[2]}`));
+const gitRepository = (cwd) => run(cwd, [
+	"remote",
+	"get-url",
+	"origin"
+]).pipe(map$13(flatMap$22(parseRepositoryFullName)));
+const gitInfo = (cwd) => all$5({
+	repository: gitRepository(cwd),
+	branch: run(cwd, [
+		"rev-parse",
+		"--abbrev-ref",
+		"HEAD"
+	])
+}, { concurrency: 2 }).pipe(map$13(({ branch, repository }) => ({
+	repository: getOrUndefined(repository),
+	branch: getOrUndefined(branch)
+})));
+const repositoryRelativePath = (cwd, filePath) => {
+	const root = `${cwd.replace(/\/+$/, "")}/`;
+	return filePath.startsWith(root) ? filePath.slice(root.length) : filePath;
+};
+
+//#endregion
+//#region src/redact.ts
+const SECRET_PATTERNS = [
+	[/(authorization\s*[:=]\s*(?:bearer|token)\s+)[^\s"']+/gi, "$1[REDACTED]"],
+	[/((?:api[_-]?key|secret[_-]?access[_-]?key|session[_-]?token)\s*[:=]\s*)[^\s"']+/gi, "$1[REDACTED]"],
+	[/((?:access[_-]?token|refresh[_-]?token|password|credential)\s*[:=]\s*)[^\s&"']+/gi, "$1[REDACTED]"],
+	[/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
+	[/\brei_[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
+	[/\b(?:ASIA|AKIA)[A-Z0-9]{12,}\b/g, "[REDACTED]"],
+	[/\b(?:ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
+	[/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[REDACTED]"],
+	[/("(?:api[_-]?key|password|secret(?:[_-]?access[_-]?key)?|(?:access|refresh|session)[_-]?token|token|authorization|credential)"\s*:\s*")(?:\\.|[^"\\])*/gi, "$1[REDACTED]"]
+];
+const redactSecrets = (value$4) => SECRET_PATTERNS.reduce((text$5, [pattern, replacement]) => text$5.replace(pattern, replacement), typeof value$4 === "string" ? value$4 : JSON.stringify(value$4 ?? ""));
+const boundedText = (value$4, limit) => {
+	const text$5 = redactSecrets(value$4).trim();
+	return text$5.length <= limit ? text$5 : `${text$5.slice(0, limit)}\n...[truncated ${text$5.length - limit} chars]`;
+};
+
+//#endregion
+//#region src/capture.ts
+const FILE_TOOL_NAMES = [
+	"Read",
+	"Edit",
+	"Write",
+	"MultiEdit",
+	"NotebookEdit",
+	"read",
+	"edit",
+	"write"
+];
+const MODIFYING_TOOL_NAMES = [
+	"Edit",
+	"Write",
+	"MultiEdit",
+	"NotebookEdit",
+	"edit",
+	"write"
+];
+const SHELL_TOOL_NAMES = [
+	"Bash",
+	"Shell",
+	"shell",
+	"bash",
+	"run_terminal_cmd",
+	"exec_command",
+	"shell_command"
+];
+const COMMAND_CATEGORIES = [["test", /(?:^|\s)(?:pytest|py\.test|jest|vitest|go\s+test|cargo\s+test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|mvn\s+test|gradle\s+test|make\s+test)(?:\s|$)/i], ["build", /(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?build(?:\s|$)|(?:^|\s)(?:cargo|go|mvn|gradle|make)\s+build(?:\s|$)/i]];
+const MAX_COMMAND_CHARS = 2e3;
+const MAX_COMMAND_OUTPUT_CHARS = 500;
+const MAX_EVIDENCE_PATHS = 50;
+const decodeResponse = (response) => getOrElse$5(decodeUnknownOption(ToolResponse)(response), () => ({}));
+const commandCategory = (command$1) => COMMAND_CATEGORIES.find(([, pattern]) => pattern.test(command$1))?.[0] ?? "shell";
+const responseText = (response) => {
+	if (isString(response)) return response;
+	const decoded = decodeResponse(response);
+	return findFirst$7([
+		decoded.output,
+		decoded.aggregated_output,
+		decoded.stdout,
+		decoded.stderr,
+		decoded.error_message
+	], (value$4) => isString(value$4) && value$4.length > 0).pipe(getOrElse$5(() => ""));
+};
+const responseFailed = (response) => {
+	const decoded = decodeResponse(response);
+	return fromNullable$2(decoded.exit_code).pipe(map$31((code) => code !== 0), orElse$17(() => fromNullable$2(decoded.isError)), orElse$17(() => map$31(fromNullable$2(decoded.success), (ok) => !ok)), getOrUndefined);
+};
+const recordsFromTool = (options$6) => {
+	const input = getOrElse$5(decodeUnknownOption(ToolInput)(options$6.toolInput), () => ({}));
+	const failed = options$6.failed ?? responseFailed(options$6.toolResponse) ?? false;
+	if (options$6.toolName === "SubagentHandback") {
+		const text$5 = redactSecrets(input.message ?? "").trim();
+		return text$5 ? [{
+			kind: "agent",
+			observedAt: options$6.observedAt,
+			text: `Subagent report:\n${text$5}`
+		}] : [];
+	}
+	if (options$6.toolName === "apply_patch") {
+		if (failed) return [];
+		return [...(input.command ?? "").matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].flatMap((match$24) => {
+			const path$2 = repositoryRelativePath(options$6.cwd, redactSecrets(match$24[1] ?? "").trim());
+			return path$2 ? [{
+				kind: "file",
+				observedAt: options$6.observedAt,
+				action: "modified",
+				path: path$2
+			}] : [];
+		});
+	}
+	if (SHELL_TOOL_NAMES.includes(options$6.toolName)) {
+		const command$1 = boundedText(input.command ?? input.cmd ?? "", MAX_COMMAND_CHARS);
+		if (!command$1) return [];
+		const output = failed ? boundedText(responseText(options$6.toolResponse), MAX_COMMAND_OUTPUT_CHARS) : "";
+		return [{
+			kind: "command",
+			observedAt: options$6.observedAt,
+			command: command$1,
+			failed,
+			category: commandCategory(command$1),
+			...output ? { output } : {}
+		}];
+	}
+	if (!FILE_TOOL_NAMES.includes(options$6.toolName)) return [];
+	const raw$4 = input.file_path || input.filePath || input.path || input.notebook_path || "";
+	const path$1 = repositoryRelativePath(options$6.cwd, redactSecrets(raw$4).trim());
+	if (!path$1) return [];
+	return [{
+		kind: "file",
+		observedAt: options$6.observedAt,
+		action: MODIFYING_TOOL_NAMES.includes(options$6.toolName) ? "modified" : "read",
+		path: path$1
+	}];
+};
+const uniquePaths = (records, action) => dedupe(records.flatMap((record$2) => record$2.kind === "file" && record$2.action === action ? [record$2.path] : [])).slice(0, MAX_EVIDENCE_PATHS);
+const commandLine = (command$1) => {
+	const status$3 = command$1.failed ? "failed" : "succeeded";
+	const label = command$1.category === "shell" ? "" : ` (${command$1.category})`;
+	const detail = command$1.output ? `\n  ${command$1.output.replace(/\n/g, "\n  ")}` : "";
+	return `- \`${command$1.command}\`${label} ${status$3}${detail}`;
+};
+const renderEvidence = (records) => {
+	const modified = uniquePaths(records, "modified");
+	const read$3 = uniquePaths(records, "read");
+	const commands = records.filter((record$2) => record$2.kind === "command");
+	return [
+		modified.length > 0 ? ["Files modified:", ...modified.map((path$1) => `- ${path$1}`)] : [],
+		read$3.length > 0 ? ["Files read:", ...read$3.map((path$1) => `- ${path$1}`)] : [],
+		commands.length > 0 ? ["Commands run:", ...commands.map(commandLine)] : []
+	].filter((section) => section.length > 0).map((section) => section.join("\n")).join("\n\n");
+};
+
+//#endregion
+//#region src/flush.ts
+const STALE_RUNNING_MS = 300 * 1e3;
+const BATCH_MAX_AGE_MS = 300 * 1e3;
+const BATCH_MAX_BYTES = 64 * 1024;
+const TRIGGER_RANK = {
+	backstop: 0,
+	boundary: 1,
+	final: 2
+};
+const PENDING_LAUNCH_LIMIT = 5;
+const INGEST_BATCH_LIMIT = 200;
+const splitText = (text$5) => globalThis.Array.from({ length: Math.ceil(text$5.length / MAX_MESSAGE_CHARS) }, (_, index) => text$5.slice(index * MAX_MESSAGE_CHARS, (index + 1) * MAX_MESSAGE_CHARS));
+const buildEvents = (records, fromIndex, nextSeq) => {
+	const slice = records.slice(fromIndex);
+	if (!isNonEmptyReadonlyArray(slice)) return [];
+	const evidence = renderEvidence(slice);
+	const observedAt = lastNonEmpty(slice).observedAt;
+	return [...slice.flatMap((record$2) => record$2.kind === "person" || record$2.kind === "agent" ? [{
+		role: record$2.kind,
+		text: record$2.text,
+		observedAt: record$2.observedAt
+	}] : []), ...evidence ? [{
+		role: "evidence",
+		text: evidence,
+		observedAt
+	}] : []].flatMap((draft) => splitText(draft.text).map((text$5) => ({
+		...draft,
+		text: text$5
+	}))).map((draft, index) => ({
+		...draft,
+		seq: nextSeq + index
+	}));
+};
+const launchHandoff = (path$1) => gen(function* () {
+	const fs$2 = yield* FileSystem;
+	const bin = yield* FlushWorkerBin;
+	const running$3 = path$1.endsWith(".running") ? path$1 : path$1.replace(/\.json$/, ".running");
+	yield* fs$2.rename(path$1, running$3);
+	const now$2 = new Date(yield* currentTimeMillis);
+	yield* fs$2.utimes(running$3, now$2, now$2);
+	yield* sync$12(() => {
+		const child = spawn(process.execPath, [
+			getOrElse$5(bin, () => fileURLToPath(import.meta.url)),
+			"flush",
+			running$3
+		], {
+			detached: true,
+			stdio: "ignore"
+		});
+		child.on("error", () => void 0);
+		child.unref();
+	});
+});
+const scheduleFlush = ({ host, sessionId, reason, trigger }) => gen(function* () {
+	const store = yield* AgentStore;
+	const path$1 = yield* Path;
+	if (yield* store.isPaused) return;
+	const key = sessionKey(host, sessionId);
+	const file$4 = yield* store.withLock(key, gen(function* () {
+		const pending$2 = yield* store.listPending;
+		const state = yield* store.readState(host, sessionId);
+		if (isNone$2(state) || state.value.scopeMismatch || state.value.scopeChanged || state.value.scopeKey === void 0) return none$9();
+		const current$1 = state.value;
+		const deferred = current$1.deferredFlush;
+		const effective = deferred !== void 0 && TRIGGER_RANK[deferred] > TRIGGER_RANK[trigger] ? deferred : trigger;
+		if (pending$2.some((name) => name.startsWith(`${key}__`))) {
+			if (effective !== "backstop" && effective !== current$1.deferredFlush) yield* store.writeState({
+				...current$1,
+				deferredFlush: effective
+			});
+			return none$9();
+		}
+		const now$2 = yield* currentTimeMillis;
+		const logBytes = yield* store.recordBytes(host, sessionId);
+		if (!(effective !== "backstop" || logBytes - (current$1.snapshotBytes ?? 0) >= BATCH_MAX_BYTES || current$1.pendingSince !== void 0 && now$2 - current$1.pendingSince >= BATCH_MAX_AGE_MS)) return none$9();
+		const records = yield* store.readRecords(host, sessionId);
+		const events = buildEvents(records, current$1.flushedRecords, current$1.nextSeq);
+		if (events.length === 0) {
+			yield* store.writeState({
+				...current$1,
+				snapshotBytes: logBytes,
+				deferredFlush: void 0,
+				pendingSince: current$1.heldRecords.length > 0 ? current$1.pendingSince : void 0
+			});
+			return none$9();
+		}
+		const file$5 = path$1.join(store.pendingDir, `${key}__${reason}__${randomUUID()}.json`);
+		yield* store.writeHandoff(file$5, {
+			host,
+			sessionId,
+			reason,
+			...effective === "final" ? { final: true } : {},
+			snapshot: {
+				events,
+				throughRecord: records.length,
+				nextSeq: current$1.nextSeq + events.length,
+				repository: current$1.repository,
+				branch: current$1.branch,
+				scopeKey: current$1.scopeKey,
+				apiUrl: current$1.apiUrl,
+				credentialKey: current$1.credentialKey
+			}
+		});
+		yield* store.writeState({
+			...current$1,
+			lastFlushAt: now$2,
+			snapshotBytes: logBytes,
+			deferredFlush: void 0
+		});
+		return some$9(file$5);
+	}));
+	yield* forEach$3(toArray$2(file$4), launchHandoff, { discard: true });
+});
+const ageOf = (fs$2, file$4, now$2) => fs$2.stat(file$4).pipe(map$13((info$2) => now$2 - getOrElse$5(info$2.mtime, () => /* @__PURE__ */ new Date(0)).getTime()));
+const recoverPending = gen(function* () {
+	const store = yield* AgentStore;
+	const fs$2 = yield* FileSystem;
+	const path$1 = yield* Path;
+	if (yield* store.isPaused) return 0;
+	const now$2 = yield* currentTimeMillis;
+	const names = yield* store.listPending;
+	const fileOf = (name) => path$1.join(store.pendingDir, name);
+	yield* forEach$3(names.filter((name) => name.endsWith(".running")), (name) => ageOf(fs$2, fileOf(name), now$2).pipe(flatMap$9((age) => fs$2.rename(fileOf(name), fileOf(name.replace(/\.running$/, ".json"))).pipe(when$5(() => age > STALE_RUNNING_MS))), ignore), { discard: true });
+	const fresh$2 = (yield* store.listPending).filter((name) => name.endsWith(".json"));
+	yield* forEach$3(fresh$2.slice(0, PENDING_LAUNCH_LIMIT), (name) => launchHandoff(fileOf(name)).pipe(ignore), { discard: true });
+	return fresh$2.length;
+});
+const ingest = (handoff) => gen(function* () {
+	const backend = yield* Backend;
+	const store = yield* AgentStore;
+	const snapshot = handoff.snapshot;
+	if (snapshot.scopeKey === void 0 || snapshot.apiUrl !== (yield* backend.apiUrl)) return yield* new BackendCallError({
+		tool: "IngestCodingSession",
+		message: "Captured events belong to another sign-in",
+		category: "scope_changed"
+	});
+	const chunks$2 = chunksOf(snapshot.events, INGEST_BATCH_LIMIT);
+	yield* forEach$3(chunks$2, (events, index) => gen(function* () {
+		if ((yield* store.isPaused) || snapshot.apiUrl !== (yield* backend.apiUrl)) return yield* new BackendCallError({
+			tool: "IngestCodingSession",
+			message: "Capture is paused or its API changed"
+		});
+		yield* backend.callTool("IngestCodingSession", {
+			host: handoff.host,
+			hostSessionId: handoff.sessionId,
+			repository: snapshot.repository,
+			branch: snapshot.branch,
+			scopeKey: snapshot.scopeKey,
+			events,
+			...handoff.final === true && index === chunks$2.length - 1 ? { final: true } : {}
+		}, "Shipping a captured local coding session to Reintersect so it can extract memories", Unknown);
+	}).pipe(timeout$2("20 seconds"), retry$7({
+		while: (error$2) => error$2._tag === "TimeoutException" || error$2._tag === "BackendCallError" && error$2.retryable === true,
+		schedule: exponential("1 second").pipe(intersect(recurs(2)), jittered)
+	})), { discard: true });
+});
+const runFlush = (path$1) => gen(function* () {
+	const store = yield* AgentStore;
+	const fs$2 = yield* FileSystem;
+	if (yield* store.isPaused) {
+		yield* fs$2.rename(path$1, path$1.replace(/\.running$/, ".json")).pipe(ignore);
+		return;
+	}
+	const pending$2 = yield* store.readHandoff(path$1);
+	if (isNone$2(pending$2)) return;
+	const handoff = pending$2.value;
+	const key = sessionKey(handoff.host, handoff.sessionId);
+	const completed = yield* store.withLock(`upload-${key}`, gen(function* () {
+		const snapshot = yield* store.withLock(key, gen(function* () {
+			const state = yield* store.readState(handoff.host, handoff.sessionId);
+			if (isNone$2(state)) return none$9();
+			if (handoff.snapshot !== void 0) return some$9(handoff.snapshot);
+			const records = yield* store.readRecords(handoff.host, handoff.sessionId);
+			const events = buildEvents(records, state.value.flushedRecords, state.value.nextSeq);
+			const snapshot$1 = {
+				events,
+				throughRecord: records.length,
+				nextSeq: state.value.nextSeq + events.length,
+				repository: state.value.repository,
+				branch: state.value.branch,
+				scopeKey: state.value.scopeKey,
+				apiUrl: state.value.apiUrl,
+				credentialKey: state.value.credentialKey
+			};
+			yield* store.writeHandoff(path$1, {
+				...handoff,
+				snapshot: snapshot$1
+			});
+			return some$9(snapshot$1);
+		}));
+		if (isNone$2(snapshot)) return false;
+		yield* ingest({
+			...handoff,
+			snapshot: snapshot.value
+		});
+		yield* store.withLock(key, gen(function* () {
+			const current$1 = yield* store.readState(handoff.host, handoff.sessionId);
+			if (isNone$2(current$1)) return;
+			const now$2 = yield* currentTimeMillis;
+			const remaining = (yield* store.readRecords(handoff.host, handoff.sessionId)).slice(snapshot.value.throughRecord);
+			const oldestRemaining = head$11(remaining).pipe(map$31((record$2) => make$44(record$2.observedAt).pipe(map$31(toEpochMillis), getOrElse$5(() => now$2))));
+			yield* store.writeState({
+				...current$1.value,
+				flushedRecords: Math.max(current$1.value.flushedRecords, snapshot.value.throughRecord),
+				nextSeq: Math.max(current$1.value.nextSeq, snapshot.value.nextSeq),
+				lastUploadAt: now$2,
+				pendingSince: getOrUndefined(oldestRemaining),
+				queueWarned: false
+			});
+			yield* fs$2.remove(path$1);
+		}));
+		return true;
+	}));
+	yield* scheduleFlush({
+		host: handoff.host,
+		sessionId: handoff.sessionId,
+		reason: "continued",
+		trigger: "backstop"
+	}).pipe(when$5(() => completed));
+}).pipe(catchAll$10((error$2) => gen(function* () {
+	const store = yield* AgentStore;
+	const fs$2 = yield* FileSystem;
+	yield* store.logError("flush", error$2).pipe(ignore);
+	yield* fs$2.rename(path$1, path$1.replace(/\.running$/, ".json")).pipe(ignore);
+})));
+
+//#endregion
 //#region src/health.ts
+const QUEUE_WARNING_MS = 300 * 1e3;
 const queueWarning = (input) => gen(function* () {
 	const store = yield* AgentStore;
 	return yield* store.withLock(sessionKey(input.host, input.sessionId), gen(function* () {
 		const state = yield* store.readState(input.host, input.sessionId);
 		const now$2 = yield* currentTimeMillis;
-		if (isNone$2(state) || state.value.queueWarned || state.value.pendingSince === void 0 || now$2 - state.value.pendingSince < 3e5) return void 0;
+		if (isNone$2(state) || state.value.queueWarned) return void 0;
+		const { lastFlushAt, lastUploadAt, pendingSince } = state.value;
+		const undelivered = lastFlushAt !== void 0 && lastFlushAt > (lastUploadAt ?? 0) && now$2 - lastFlushAt >= QUEUE_WARNING_MS;
+		const unbatched = pendingSince !== void 0 && now$2 - pendingSince >= BATCH_MAX_AGE_MS + QUEUE_WARNING_MS;
+		if (!undelivered && !unbatched) return void 0;
 		yield* store.writeState({
 			...state.value,
 			queueWarned: true
@@ -109999,359 +110396,6 @@ const setPaused = (paused) => gen(function* () {
 	}), { discard: true });
 	yield* log(paused ? "Capture paused. Existing memories stay searchable and pending batches are held, not dropped." : "Capture resumed.");
 });
-
-//#endregion
-//#region src/git.ts
-const GIT_TIMEOUT = millis(500);
-const run = (cwd, args$1) => string$1(make$7("git", "-C", cwd, ...args$1)).pipe(timeout$2(GIT_TIMEOUT), map$13((text$5) => liftPredicate$2(text$5.trim(), isNonEmpty$1)), orElseSucceed$2(() => none$9()));
-const parseRepositoryFullName = (remote) => fromNullable$2(remote.trim().replace(/\.git$/, "").match(/[/:]([^/:\s]+)\/([^/\s]+)$/)).pipe(map$31((match$24) => `${match$24[1]}/${match$24[2]}`));
-const gitRepository = (cwd) => run(cwd, [
-	"remote",
-	"get-url",
-	"origin"
-]).pipe(map$13(flatMap$22(parseRepositoryFullName)));
-const gitInfo = (cwd) => all$5({
-	repository: gitRepository(cwd),
-	branch: run(cwd, [
-		"rev-parse",
-		"--abbrev-ref",
-		"HEAD"
-	])
-}, { concurrency: 2 }).pipe(map$13(({ branch, repository }) => ({
-	repository: getOrUndefined(repository),
-	branch: getOrUndefined(branch)
-})));
-const repositoryRelativePath = (cwd, filePath) => {
-	const root = `${cwd.replace(/\/+$/, "")}/`;
-	return filePath.startsWith(root) ? filePath.slice(root.length) : filePath;
-};
-
-//#endregion
-//#region src/redact.ts
-const SECRET_PATTERNS = [
-	[/(authorization\s*[:=]\s*(?:bearer|token)\s+)[^\s"']+/gi, "$1[REDACTED]"],
-	[/((?:api[_-]?key|secret[_-]?access[_-]?key|session[_-]?token)\s*[:=]\s*)[^\s"']+/gi, "$1[REDACTED]"],
-	[/((?:access[_-]?token|refresh[_-]?token|password|credential)\s*[:=]\s*)[^\s&"']+/gi, "$1[REDACTED]"],
-	[/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
-	[/\brei_[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
-	[/\b(?:ASIA|AKIA)[A-Z0-9]{12,}\b/g, "[REDACTED]"],
-	[/\b(?:ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]"],
-	[/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[REDACTED]"],
-	[/("(?:api[_-]?key|password|secret(?:[_-]?access[_-]?key)?|(?:access|refresh|session)[_-]?token|token|authorization|credential)"\s*:\s*")(?:\\.|[^"\\])*/gi, "$1[REDACTED]"]
-];
-const redactSecrets = (value$4) => SECRET_PATTERNS.reduce((text$5, [pattern, replacement]) => text$5.replace(pattern, replacement), typeof value$4 === "string" ? value$4 : JSON.stringify(value$4 ?? ""));
-const boundedText = (value$4, limit) => {
-	const text$5 = redactSecrets(value$4).trim();
-	return text$5.length <= limit ? text$5 : `${text$5.slice(0, limit)}\n...[truncated ${text$5.length - limit} chars]`;
-};
-
-//#endregion
-//#region src/capture.ts
-const FILE_TOOL_NAMES = [
-	"Read",
-	"Edit",
-	"Write",
-	"MultiEdit",
-	"NotebookEdit",
-	"read",
-	"edit",
-	"write"
-];
-const MODIFYING_TOOL_NAMES = [
-	"Edit",
-	"Write",
-	"MultiEdit",
-	"NotebookEdit",
-	"edit",
-	"write"
-];
-const SHELL_TOOL_NAMES = [
-	"Bash",
-	"Shell",
-	"shell",
-	"bash",
-	"run_terminal_cmd",
-	"exec_command",
-	"shell_command"
-];
-const COMMAND_CATEGORIES = [["test", /(?:^|\s)(?:pytest|py\.test|jest|vitest|go\s+test|cargo\s+test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|mvn\s+test|gradle\s+test|make\s+test)(?:\s|$)/i], ["build", /(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?build(?:\s|$)|(?:^|\s)(?:cargo|go|mvn|gradle|make)\s+build(?:\s|$)/i]];
-const MAX_COMMAND_CHARS = 2e3;
-const MAX_COMMAND_OUTPUT_CHARS = 500;
-const MAX_EVIDENCE_PATHS = 50;
-const decodeResponse = (response) => getOrElse$5(decodeUnknownOption(ToolResponse)(response), () => ({}));
-const commandCategory = (command$1) => COMMAND_CATEGORIES.find(([, pattern]) => pattern.test(command$1))?.[0] ?? "shell";
-const responseText = (response) => {
-	if (isString(response)) return response;
-	const decoded = decodeResponse(response);
-	return findFirst$7([
-		decoded.output,
-		decoded.aggregated_output,
-		decoded.stdout,
-		decoded.stderr,
-		decoded.error_message
-	], (value$4) => isString(value$4) && value$4.length > 0).pipe(getOrElse$5(() => ""));
-};
-const responseFailed = (response) => {
-	const decoded = decodeResponse(response);
-	return fromNullable$2(decoded.exit_code).pipe(map$31((code) => code !== 0), orElse$17(() => fromNullable$2(decoded.isError)), orElse$17(() => map$31(fromNullable$2(decoded.success), (ok) => !ok)), getOrUndefined);
-};
-const recordsFromTool = (options$6) => {
-	const input = getOrElse$5(decodeUnknownOption(ToolInput)(options$6.toolInput), () => ({}));
-	const failed = options$6.failed ?? responseFailed(options$6.toolResponse) ?? false;
-	if (options$6.toolName === "SubagentHandback") {
-		const text$5 = redactSecrets(input.message ?? "").trim();
-		return text$5 ? [{
-			kind: "agent",
-			observedAt: options$6.observedAt,
-			text: `Subagent report:\n${text$5}`
-		}] : [];
-	}
-	if (options$6.toolName === "apply_patch") {
-		if (failed) return [];
-		return [...(input.command ?? "").matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].flatMap((match$24) => {
-			const path$2 = repositoryRelativePath(options$6.cwd, redactSecrets(match$24[1] ?? "").trim());
-			return path$2 ? [{
-				kind: "file",
-				observedAt: options$6.observedAt,
-				action: "modified",
-				path: path$2
-			}] : [];
-		});
-	}
-	if (SHELL_TOOL_NAMES.includes(options$6.toolName)) {
-		const command$1 = boundedText(input.command ?? input.cmd ?? "", MAX_COMMAND_CHARS);
-		if (!command$1) return [];
-		const output = failed ? boundedText(responseText(options$6.toolResponse), MAX_COMMAND_OUTPUT_CHARS) : "";
-		return [{
-			kind: "command",
-			observedAt: options$6.observedAt,
-			command: command$1,
-			failed,
-			category: commandCategory(command$1),
-			...output ? { output } : {}
-		}];
-	}
-	if (!FILE_TOOL_NAMES.includes(options$6.toolName)) return [];
-	const raw$4 = input.file_path || input.filePath || input.path || input.notebook_path || "";
-	const path$1 = repositoryRelativePath(options$6.cwd, redactSecrets(raw$4).trim());
-	if (!path$1) return [];
-	return [{
-		kind: "file",
-		observedAt: options$6.observedAt,
-		action: MODIFYING_TOOL_NAMES.includes(options$6.toolName) ? "modified" : "read",
-		path: path$1
-	}];
-};
-const uniquePaths = (records, action) => dedupe(records.flatMap((record$2) => record$2.kind === "file" && record$2.action === action ? [record$2.path] : [])).slice(0, MAX_EVIDENCE_PATHS);
-const commandLine = (command$1) => {
-	const status$3 = command$1.failed ? "failed" : "succeeded";
-	const label = command$1.category === "shell" ? "" : ` (${command$1.category})`;
-	const detail = command$1.output ? `\n  ${command$1.output.replace(/\n/g, "\n  ")}` : "";
-	return `- \`${command$1.command}\`${label} ${status$3}${detail}`;
-};
-const renderEvidence = (records) => {
-	const modified = uniquePaths(records, "modified");
-	const read$3 = uniquePaths(records, "read");
-	const commands = records.filter((record$2) => record$2.kind === "command");
-	return [
-		modified.length > 0 ? ["Files modified:", ...modified.map((path$1) => `- ${path$1}`)] : [],
-		read$3.length > 0 ? ["Files read:", ...read$3.map((path$1) => `- ${path$1}`)] : [],
-		commands.length > 0 ? ["Commands run:", ...commands.map(commandLine)] : []
-	].filter((section) => section.length > 0).map((section) => section.join("\n")).join("\n\n");
-};
-
-//#endregion
-//#region src/flush.ts
-const STALE_RUNNING_MS = 300 * 1e3;
-const PENDING_LAUNCH_LIMIT = 5;
-const INGEST_BATCH_LIMIT = 200;
-const splitText = (text$5) => globalThis.Array.from({ length: Math.ceil(text$5.length / MAX_MESSAGE_CHARS) }, (_, index) => text$5.slice(index * MAX_MESSAGE_CHARS, (index + 1) * MAX_MESSAGE_CHARS));
-const buildEvents = (records, fromIndex, nextSeq) => {
-	const slice = records.slice(fromIndex);
-	if (!isNonEmptyReadonlyArray(slice)) return [];
-	const evidence = renderEvidence(slice);
-	const observedAt = lastNonEmpty(slice).observedAt;
-	return [...slice.flatMap((record$2) => record$2.kind === "person" || record$2.kind === "agent" ? [{
-		role: record$2.kind,
-		text: record$2.text,
-		observedAt: record$2.observedAt
-	}] : []), ...evidence ? [{
-		role: "evidence",
-		text: evidence,
-		observedAt
-	}] : []].flatMap((draft) => splitText(draft.text).map((text$5) => ({
-		...draft,
-		text: text$5
-	}))).map((draft, index) => ({
-		...draft,
-		seq: nextSeq + index
-	}));
-};
-const launchHandoff = (path$1) => gen(function* () {
-	const fs$2 = yield* FileSystem;
-	const bin = yield* FlushWorkerBin;
-	const running$3 = path$1.endsWith(".running") ? path$1 : path$1.replace(/\.json$/, ".running");
-	yield* fs$2.rename(path$1, running$3);
-	const now$2 = new Date(yield* currentTimeMillis);
-	yield* fs$2.utimes(running$3, now$2, now$2);
-	yield* sync$12(() => {
-		const child = spawn(process.execPath, [
-			getOrElse$5(bin, () => fileURLToPath(import.meta.url)),
-			"flush",
-			running$3
-		], {
-			detached: true,
-			stdio: "ignore"
-		});
-		child.on("error", () => void 0);
-		child.unref();
-	});
-});
-const scheduleFlush = (handoff) => gen(function* () {
-	const store = yield* AgentStore;
-	const path$1 = yield* Path;
-	if (yield* store.isPaused) return;
-	const key = sessionKey(handoff.host, handoff.sessionId);
-	const file$4 = yield* store.withLock(key, gen(function* () {
-		const pending$2 = yield* store.listPending;
-		const state = yield* store.readState(handoff.host, handoff.sessionId);
-		if (isNone$2(state) || state.value.scopeMismatch || state.value.scopeChanged || state.value.scopeKey === void 0) return none$9();
-		if (pending$2.some((name) => name.startsWith(`${key}__`))) return none$9();
-		const now$2 = yield* currentTimeMillis;
-		if (handoff.reason === "background-recall" && state.value.lastFlushAt !== void 0 && now$2 - state.value.lastFlushAt < 6e4) return none$9();
-		const records = yield* store.readRecords(handoff.host, handoff.sessionId);
-		const events = buildEvents(records, state.value.flushedRecords, state.value.nextSeq);
-		if (events.length === 0) return none$9();
-		const file$5 = path$1.join(store.pendingDir, `${key}__${handoff.reason}__${randomUUID()}.json`);
-		yield* store.writeHandoff(file$5, {
-			...handoff,
-			snapshot: {
-				events,
-				throughRecord: records.length,
-				nextSeq: state.value.nextSeq + events.length,
-				repository: state.value.repository,
-				branch: state.value.branch,
-				scopeKey: state.value.scopeKey,
-				apiUrl: state.value.apiUrl,
-				credentialKey: state.value.credentialKey
-			}
-		});
-		yield* store.writeState({
-			...state.value,
-			lastFlushAt: now$2
-		});
-		return some$9(file$5);
-	}));
-	yield* forEach$3(toArray$2(file$4), launchHandoff, { discard: true });
-});
-const ageOf = (fs$2, file$4, now$2) => fs$2.stat(file$4).pipe(map$13((info$2) => now$2 - getOrElse$5(info$2.mtime, () => /* @__PURE__ */ new Date(0)).getTime()));
-const recoverPending = gen(function* () {
-	const store = yield* AgentStore;
-	const fs$2 = yield* FileSystem;
-	const path$1 = yield* Path;
-	if (yield* store.isPaused) return 0;
-	const now$2 = yield* currentTimeMillis;
-	const names = yield* store.listPending;
-	const fileOf = (name) => path$1.join(store.pendingDir, name);
-	yield* forEach$3(names.filter((name) => name.endsWith(".running")), (name) => ageOf(fs$2, fileOf(name), now$2).pipe(flatMap$9((age) => fs$2.rename(fileOf(name), fileOf(name.replace(/\.running$/, ".json"))).pipe(when$5(() => age > STALE_RUNNING_MS))), ignore), { discard: true });
-	const fresh$2 = (yield* store.listPending).filter((name) => name.endsWith(".json"));
-	yield* forEach$3(fresh$2.slice(0, PENDING_LAUNCH_LIMIT), (name) => launchHandoff(fileOf(name)).pipe(ignore), { discard: true });
-	return fresh$2.length;
-});
-const ingest = (handoff) => gen(function* () {
-	const backend = yield* Backend;
-	const store = yield* AgentStore;
-	const snapshot = handoff.snapshot;
-	if (snapshot.scopeKey === void 0 || snapshot.apiUrl !== (yield* backend.apiUrl)) return yield* new BackendCallError({
-		tool: "IngestCodingSession",
-		message: "Captured events belong to another sign-in",
-		category: "scope_changed"
-	});
-	yield* forEach$3(chunksOf(snapshot.events, INGEST_BATCH_LIMIT), (events) => gen(function* () {
-		if ((yield* store.isPaused) || snapshot.apiUrl !== (yield* backend.apiUrl)) return yield* new BackendCallError({
-			tool: "IngestCodingSession",
-			message: "Capture is paused or its API changed"
-		});
-		yield* backend.callTool("IngestCodingSession", {
-			host: handoff.host,
-			hostSessionId: handoff.sessionId,
-			repository: snapshot.repository,
-			branch: snapshot.branch,
-			scopeKey: snapshot.scopeKey,
-			events
-		}, "Shipping a captured local coding session to Reintersect so it can extract memories", Unknown);
-	}).pipe(timeout$2("20 seconds"), retry$7({
-		while: (error$2) => error$2._tag === "TimeoutException" || error$2._tag === "BackendCallError" && error$2.retryable === true,
-		schedule: exponential("1 second").pipe(intersect(recurs(2)), jittered)
-	})), { discard: true });
-});
-const runFlush = (path$1) => gen(function* () {
-	const store = yield* AgentStore;
-	const fs$2 = yield* FileSystem;
-	if (yield* store.isPaused) {
-		yield* fs$2.rename(path$1, path$1.replace(/\.running$/, ".json")).pipe(ignore);
-		return;
-	}
-	const pending$2 = yield* store.readHandoff(path$1);
-	if (isNone$2(pending$2)) return;
-	const handoff = pending$2.value;
-	const key = sessionKey(handoff.host, handoff.sessionId);
-	const completed = yield* store.withLock(`upload-${key}`, gen(function* () {
-		const snapshot = yield* store.withLock(key, gen(function* () {
-			const state = yield* store.readState(handoff.host, handoff.sessionId);
-			if (isNone$2(state)) return none$9();
-			if (handoff.snapshot !== void 0) return some$9(handoff.snapshot);
-			const records = yield* store.readRecords(handoff.host, handoff.sessionId);
-			const events = buildEvents(records, state.value.flushedRecords, state.value.nextSeq);
-			const snapshot$1 = {
-				events,
-				throughRecord: records.length,
-				nextSeq: state.value.nextSeq + events.length,
-				repository: state.value.repository,
-				branch: state.value.branch,
-				scopeKey: state.value.scopeKey,
-				apiUrl: state.value.apiUrl,
-				credentialKey: state.value.credentialKey
-			};
-			yield* store.writeHandoff(path$1, {
-				...handoff,
-				snapshot: snapshot$1
-			});
-			return some$9(snapshot$1);
-		}));
-		if (isNone$2(snapshot)) return false;
-		yield* ingest({
-			...handoff,
-			snapshot: snapshot.value
-		});
-		yield* store.withLock(key, gen(function* () {
-			const current$1 = yield* store.readState(handoff.host, handoff.sessionId);
-			if (isNone$2(current$1)) return;
-			const now$2 = yield* currentTimeMillis;
-			const remaining = (yield* store.readRecords(handoff.host, handoff.sessionId)).slice(snapshot.value.throughRecord);
-			yield* store.writeState({
-				...current$1.value,
-				flushedRecords: Math.max(current$1.value.flushedRecords, snapshot.value.throughRecord),
-				nextSeq: Math.max(current$1.value.nextSeq, snapshot.value.nextSeq),
-				lastUploadAt: now$2,
-				pendingSince: remaining.length > 0 ? current$1.value.pendingSince : void 0,
-				queueWarned: false
-			});
-			yield* fs$2.remove(path$1);
-		}));
-		return true;
-	}));
-	yield* scheduleFlush({
-		host: handoff.host,
-		sessionId: handoff.sessionId,
-		reason: "continued"
-	}).pipe(when$5(() => completed));
-}).pipe(catchAll$10((error$2) => gen(function* () {
-	const store = yield* AgentStore;
-	const fs$2 = yield* FileSystem;
-	yield* store.logError("flush", error$2).pipe(ignore);
-	yield* fs$2.rename(path$1, path$1.replace(/\.running$/, ".json")).pipe(ignore);
-})));
 
 //#endregion
 //#region src/identity.ts
@@ -111175,13 +111219,14 @@ const runHook = (host, event, stdin$3) => gen(function* () {
 		"SubagentStart",
 		"Refresh"
 	].includes(input.action._tag);
-	const flush = !recallOnly && (input.action._tag === "Flush" || input.action._tag === "AssistantStop" || input.action._tag === "SubagentStop" || input.action._tag === "Refresh");
-	yield* scheduleFlush({
+	const trigger = recallOnly ? none$9() : value(input.action).pipe(tag("Flush", () => some$9("final")), tag("AssistantStop", "SubagentStop", () => some$9("boundary")), tag("Tool", "Refresh", () => some$9("backstop")), orElse(() => none$9()));
+	yield* forEach$3(toArray$2(trigger), (value$4) => scheduleFlush({
 		host,
 		sessionId: input.sessionId,
-		reason: event
-	}).pipe(when$5(() => flush), ignore);
-	yield* recoverPending.pipe(when$5(() => !recallOnly && (injecting || flush)), ignore);
+		reason: event,
+		trigger: value$4
+	}), { discard: true }).pipe(ignore);
+	yield* recoverPending.pipe(when$5(() => !recallOnly && (injecting || exists$3(trigger, (value$4) => value$4 !== "backstop"))), ignore);
 	const warning = yield* queueWarning(input).pipe(when$5(() => !recallOnly && injecting && input.action._tag !== "Refresh"), orElseSucceed$2(() => none$9()));
 	const output = yield* if_(injecting, {
 		onTrue: () => recall(input, startedAt),

@@ -36,6 +36,10 @@ export type CommandRecord = typeof CommandRecord.Type;
 
 export type FileRecord = typeof FileRecord.Type;
 
+export const FlushTrigger = Schema.Literal("backstop", "boundary", "final");
+
+export type FlushTrigger = typeof FlushTrigger.Type;
+
 export const SessionState = Schema.Struct({
   host: Host,
   sessionId: Schema.String,
@@ -62,6 +66,8 @@ export const SessionState = Schema.Struct({
   lastHookAt: Schema.optional(Schema.Number),
   lastUploadAt: Schema.optional(Schema.Number),
   lastFlushAt: Schema.optional(Schema.Number),
+  snapshotBytes: Schema.optional(Schema.Number),
+  deferredFlush: Schema.optional(Schema.Literal("boundary", "final")),
   pendingSince: Schema.optional(Schema.Number),
   queueWarned: Schema.optional(Schema.Boolean),
   heldRecords: Schema.optionalWith(
@@ -92,6 +98,7 @@ export const Handoff = Schema.Struct({
   host: Host,
   sessionId: Schema.String,
   reason: Schema.String,
+  final: Schema.optional(Schema.Boolean),
   snapshot: Schema.optional(
     Schema.Struct({
       events: Schema.Array(IngestEvent),

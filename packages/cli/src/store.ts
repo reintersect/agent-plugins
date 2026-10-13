@@ -129,6 +129,13 @@ export class AgentStore extends Effect.Service<AgentStore>()("AgentStore", {
               : Effect.fail(error),
           ),
         ),
+      recordBytes: (host: Host, sessionId: string) =>
+        fs.stat(logPath(host, sessionId)).pipe(
+          Effect.map((info) => Number(info.size)),
+          Effect.catchTag("SystemError", (error) =>
+            error.reason === "NotFound" ? Effect.succeed(0) : Effect.fail(error),
+          ),
+        ),
       isPaused: fs.exists(pausedPath),
       setPaused: (paused: boolean) =>
         paused

@@ -115,6 +115,54 @@ describe("session lifecycle", () => {
     }),
   );
 
+  it.scopedLive("restores search guidance without memories at agent context boundaries", () =>
+    Effect.gen(function* () {
+      yield* backend({ recall: { ...DEFAULT_RECALL, items: [], memoryIds: [], context: "" } });
+
+      for (const host of ["claudeCode", "codex"] as const) {
+        for (const source of ["startup", "resume", "compact", "clear", "fork"]) {
+          const output = yield* app(
+            runHook(
+              host,
+              "session-start",
+              JSON.stringify({ session_id: host, cwd: state.repo, source }),
+            ),
+          );
+          const context = JSON.parse(Option.getOrElse(output, () => "{}")).hookSpecificOutput
+            ?.additionalContext;
+
+          if (source === "resume" || source === "compact") {
+            expect(context).toContain("plugin's reintersect skill");
+            expect(context).not.toContain("<reintersect_memory>");
+          } else {
+            expect(output).toEqual(Option.none());
+          }
+        }
+
+        const child = yield* app(
+          runHook(
+            host,
+            "subagent-start",
+            JSON.stringify({ session_id: host, cwd: state.repo, agent_id: "child" }),
+          ),
+        );
+        expect(Option.getOrElse(child, () => "")).toContain("plugin's reintersect skill");
+        const prompt = yield* app(
+          runHook(
+            host,
+            "user-prompt",
+            JSON.stringify({ session_id: host, cwd: state.repo, prompt: "rename the variable" }),
+          ),
+        );
+        expect(Option.getOrElse(prompt, () => "")).toContain("plugin's reintersect skill");
+        const refresh = yield* app(
+          runHook(host, "background-recall", JSON.stringify({ session_id: host, cwd: state.repo })),
+        );
+        expect(refresh).toEqual(Option.none());
+      }
+    }),
+  );
+
   it.scopedLive("recalls each prompt without re-emitting unchanged memories", () =>
     Effect.gen(function* () {
       const server = yield* backend();
@@ -125,7 +173,8 @@ describe("session lifecycle", () => {
         prompt: "Why does the dashboard read through Zero instead of REST?",
       });
 
-      expect(output).toEqual(Option.none());
+      expect(Option.getOrElse(output, () => "")).toContain("plugin's reintersect skill");
+      expect(Option.getOrElse(output, () => "")).not.toContain("<reintersect_memory>");
       expect(server.calls.filter((call) => call.name === "RecallForCodingSession")).toHaveLength(2);
       expect(server.calls[1]?.arguments.prompt).toContain(
         "Why does the dashboard read through Zero instead of REST?",
@@ -220,7 +269,8 @@ describe("session lifecycle", () => {
 
       expect(Option.getOrElse(main, () => "")).toContain("Zero owns dashboard reads.");
       expect(Option.getOrElse(subagent, () => "")).toContain("Zero owns dashboard reads.");
-      expect(nextMainTurn).toEqual(Option.none());
+      expect(Option.getOrElse(nextMainTurn, () => "")).toContain("plugin's reintersect skill");
+      expect(Option.getOrElse(nextMainTurn, () => "")).not.toContain("<reintersect_memory>");
       expect(server.calls.filter((call) => call.name === "RecallForCodingSession")).toHaveLength(3);
       expect(
         readFileSync(join(state.home, "recall", "claudeCode-s-1-worker-1.json"), "utf8"),
@@ -416,6 +466,9 @@ describe("session lifecycle", () => {
       const output = yield* claude("session-start", { source: "startup" });
 
       expect(output).toEqual(Option.none());
+      const prompt = yield* claude("user-prompt", { prompt: "continue the task" });
+      expect(Option.getOrElse(prompt, () => "")).toContain("plugin's reintersect skill");
+      expect(Option.getOrElse(prompt, () => "")).not.toContain("<reintersect_memory>");
       expect(readFileSync(join(state.home, "errors.log"), "utf8")).toContain("recall");
     }),
   );

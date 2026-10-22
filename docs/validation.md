@@ -33,6 +33,26 @@ synthetic requests, and received MCP calls. A local hook invocation, received in
 request, accepted production upload, extraction completion, and useful model behavior are
 separate claims.
 
+## Agent guidance
+
+The hook tests check that Claude Code and Codex receive search guidance before
+prompts, on resume/compaction, and at subagent start even when recall returns no
+facts. Async startup and background recall do not emit standalone guidance: late
+startup output can interrupt an in-flight Codex model response. Existing pause and recall-only tests protect those modes.
+OpenCode tests check system-transform delivery without a startup or recall result,
+including child sessions. Build drift checks cover the generated skill copies.
+The native smoke test also checks that the reminder and discoverable skill description
+reach both Claude Code and Codex model request bodies.
+
+For behavioral evaluation, try both a consequential ambiguous choice (such as
+changing access after circle membership removal) and a mechanical task (such as
+renaming a local variable without changing behavior). Check whether the agent
+searches only when context could change the approach, opens important source
+matches, ignores unrelated results, and avoids repeating resolved searches.
+Fixture tests prove delivery, not appropriate search behavior by a real model.
+No additional product analytics event is added: this distributes guidance; search
+calls retain the existing tools' intent context and analytics boundary.
+
 ## Backend checks
 
 The matching backend change retains the 0.2.0 response fields and adds structured recall,

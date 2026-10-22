@@ -20,6 +20,11 @@ import {
   transcriptMessages,
 } from "#transcript";
 
+const REINTERSECT_GUIDANCE =
+  "When team context could help, use the Reintersect plugin's reintersect skill to search " +
+  "for relevant decisions before guessing or asking the user. Reuse context already supplied; " +
+  "skip unrelated or already-answered lookups.";
+
 const isoNow = Effect.map(DateTime.now, DateTime.formatIso);
 
 const freshState = (input: HookInput): SessionState => ({
@@ -388,10 +393,21 @@ export const runHook = (host: Host, event: string, stdin: string) =>
       onTrue: () => recall(input, startedAt),
       onFalse: () => Effect.succeed({ context: "", warning: undefined }),
     });
+    const guideAgent =
+      !recallOnly &&
+      (host === "claudeCode" || host === "codex") &&
+      (input.action._tag === "UserPrompt" ||
+        input.action._tag === "SubagentStart" ||
+        (input.action._tag === "SessionStart" &&
+          (input.source === "resume" || input.source === "compact")));
+    const context = guideAgent
+      ? [REINTERSECT_GUIDANCE, output.context].filter(Boolean).join("\n\n")
+      : output.context;
+
     return renderHookOutput(
       host,
       event,
-      output.context,
+      context,
       recallOnly ? undefined : (output.warning ?? Option.getOrUndefined(warning)),
     );
   }).pipe(

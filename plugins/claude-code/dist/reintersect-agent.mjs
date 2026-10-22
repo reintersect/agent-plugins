@@ -110981,6 +110981,7 @@ const readTranscriptChunk = (path$1, offset) => gen(function* () {
 
 //#endregion
 //#region src/hook.ts
+const REINTERSECT_GUIDANCE = "When team context could help, use the Reintersect plugin's reintersect skill to search for relevant decisions before guessing or asking the user. Reuse context already supplied; skip unrelated or already-answered lookups.";
 const isoNow = map$13(now, formatIso);
 const freshState = (input) => ({
 	host: input.host,
@@ -111235,7 +111236,7 @@ const runHook = (host, event, stdin$3) => gen(function* () {
 			warning: void 0
 		})
 	});
-	return renderHookOutput(host, event, output.context, recallOnly ? void 0 : output.warning ?? getOrUndefined(warning));
+	return renderHookOutput(host, event, !recallOnly && (host === "claudeCode" || host === "codex") && (input.action._tag === "UserPrompt" || input.action._tag === "SubagentStart" || input.action._tag === "SessionStart" && (input.source === "resume" || input.source === "compact")) ? [REINTERSECT_GUIDANCE, output.context].filter(Boolean).join("\n\n") : output.context, recallOnly ? void 0 : output.warning ?? getOrUndefined(warning));
 }).pipe(timeoutOption(event === "background-recall" || event === "session-start" || event === "sessionStart" ? "19 seconds" : "4 seconds"), map$13(flatten$18), catchAll$10((error$2) => AgentStore.pipe(flatMap$9((store) => store.logError(`hook ${host} ${event}`, error$2).pipe(ignore)), as$8(none$9()))));
 
 //#endregion

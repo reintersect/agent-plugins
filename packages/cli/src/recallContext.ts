@@ -11,6 +11,7 @@ interface DeltaOptions {
   readonly invalidatedMemoryIds: ReadonlyArray<string>;
   readonly previous: RecallState;
   readonly resetScope?: boolean;
+  readonly reservedChars?: number;
 }
 
 export const recallDelta = ({
@@ -19,6 +20,7 @@ export const recallDelta = ({
   invalidatedProfileKeys = [],
   previous,
   resetScope,
+  reservedChars = 0,
 }: DeltaOptions) => {
   const notice = resetScope
     ? [
@@ -43,7 +45,7 @@ export const recallDelta = ({
   );
   const selected = [...notice, ...retired, ...candidates].reduce(
     (state, item) =>
-      state.used + item.text.length + 1 > CHAR_CAP
+      state.used + item.text.length + 1 > CHAR_CAP - reservedChars
         ? state
         : {
             used: state.used + item.text.length + 1,

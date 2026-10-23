@@ -163,6 +163,39 @@ describe("session lifecycle", () => {
     }),
   );
 
+  it.scopedLive("reserves reminder space without marking omitted memories as emitted", () =>
+    Effect.gen(function* () {
+      const large = {
+        ...DEFAULT_RECALL.items[0],
+        key: "large",
+        memoryId: "large",
+        text: "x".repeat(3750),
+      };
+      yield* backend({ recall: { ...DEFAULT_RECALL, items: [large, ...DEFAULT_RECALL.items] } });
+
+      for (const host of ["claudeCode", "codex"] as const) {
+        const output = yield* app(
+          runHook(
+            host,
+            "user-prompt",
+            JSON.stringify({ session_id: host, cwd: state.repo, prompt: "check context" }),
+          ),
+        );
+        const context = JSON.parse(Option.getOrElse(output, () => "{}")).hookSpecificOutput
+          .additionalContext;
+
+        expect(context).toContain("plugin's reintersect skill");
+        expect(context).toContain("Zero owns dashboard reads.");
+        expect(context).not.toContain(large.text);
+        expect(context.length).toBeLessThanOrEqual(4000);
+        const saved = JSON.parse(
+          readFileSync(join(state.home, "recall", `${host}-${host}-main.json`), "utf8"),
+        );
+        expect(saved.emitted.map((item: { key: string }) => item.key)).toEqual(["zero-reads"]);
+      }
+    }),
+  );
+
   it.scopedLive("recalls each prompt without re-emitting unchanged memories", () =>
     Effect.gen(function* () {
       const server = yield* backend();

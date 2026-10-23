@@ -145,10 +145,14 @@ describe("session lifecycle", () => {
     expect(calls).toEqual([]);
   });
 
-  it("ignores subagent sessions", async () => {
+  it("supplies guidance without capturing or recalling subagent sessions", async () => {
     const { hooks, calls } = makeHooks();
 
     await on(hooks, "event")({ event: session("child", "parent") });
+    const output = { system: ["base prompt"] };
+
+    await on(hooks, "experimental.chat.system.transform")({ sessionID: "child" } as never, output);
+    expect(output.system).toEqual(["base prompt", GUIDANCE]);
     await on(hooks, "chat.message")({ sessionID: "child" } as never, {
       message: {} as never,
       parts: [{ type: "text", text: "subagent prompt" }] as never,

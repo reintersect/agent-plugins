@@ -389,10 +389,6 @@ export const runHook = (host: Host, event: string, stdin: string) =>
       Effect.when(() => !recallOnly && injecting && input.action._tag !== "Refresh"),
       Effect.orElseSucceed(() => Option.none<string>()),
     );
-    const output = yield* Effect.if(injecting, {
-      onTrue: () => recall(input, startedAt),
-      onFalse: () => Effect.succeed({ context: "", warning: undefined }),
-    });
     const guideAgent =
       !recallOnly &&
       (host === "claudeCode" || host === "codex") &&
@@ -400,6 +396,15 @@ export const runHook = (host: Host, event: string, stdin: string) =>
         input.action._tag === "SubagentStart" ||
         (input.action._tag === "SessionStart" &&
           (input.source === "resume" || input.source === "compact")));
+    const output = yield* Effect.if(injecting, {
+      onTrue: () =>
+        recall({
+          input,
+          startedAt,
+          reservedChars: guideAgent ? REINTERSECT_GUIDANCE.length + 2 : 0,
+        }),
+      onFalse: () => Effect.succeed({ context: "", warning: undefined }),
+    });
     const context = guideAgent
       ? [REINTERSECT_GUIDANCE, output.context].filter(Boolean).join("\n\n")
       : output.context;

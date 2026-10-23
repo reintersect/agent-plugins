@@ -39,7 +39,13 @@ const triggerFor = (input: HookInput): RecallTrigger => {
   return "startup";
 };
 
-export const recall = (input: HookInput, startedAt: number) =>
+interface RecallOptions {
+  readonly input: HookInput;
+  readonly startedAt: number;
+  readonly reservedChars: number;
+}
+
+export const recall = ({ input, startedAt, reservedChars }: RecallOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentStore;
     const backend = yield* Backend;
@@ -196,6 +202,7 @@ export const recall = (input: HookInput, startedAt: number) =>
           current.scopeKey !== undefined && current.scopeKey !== response.scopeKey;
         const previous = scopeChanged ? { ...EMPTY_RECALL_STATE, emitted: [] } : current;
         const delta = recallDelta({
+          reservedChars,
           items: response.items,
           invalidatedMemoryIds: response.invalidatedMemoryIds,
           invalidatedProfileKeys: response.invalidatedProfileKeys,

@@ -8,6 +8,8 @@ interface Call {
 
 const RECALL = "<reintersect_memory>\nFacts:\n- Zero owns reads. (id mem_1)\n</reintersect_memory>";
 
+const GUIDANCE = "Consult relevant team decisions before an unresolved choice.";
+
 const makeHooks = () => {
   const calls: Call[] = [];
   const run: Deps["run"] = async (event, payload) => {
@@ -37,6 +39,7 @@ const makeHooks = () => {
     directory: "/repo",
     packageDir: "/pkg",
     commands: [
+      { name: "reintersect", description: "Team context", template: GUIDANCE },
       {
         name: "login",
         description: "Sign in",
@@ -119,18 +122,37 @@ describe("session lifecycle", () => {
     const output = { system: ["base prompt"] };
 
     await on(hooks, "experimental.chat.system.transform")({ sessionID: "s1" } as never, output);
-    expect(output.system).toEqual(["base prompt", RECALL, RECALL]);
+    expect(output.system).toEqual(["base prompt", GUIDANCE, RECALL, RECALL]);
 
     const untouched = { system: ["base prompt"] };
 
     await on(hooks, "experimental.chat.system.transform")({} as never, untouched);
-    expect(untouched.system).toEqual(["base prompt"]);
+    expect(untouched.system).toEqual(["base prompt", GUIDANCE]);
   });
 
-  it("ignores subagent sessions", async () => {
+  it("supplies guidance to resumed and child sessions without requiring a recall result", async () => {
+    const { hooks, calls } = makeHooks();
+
+    for (const sessionID of ["resumed", "child"]) {
+      for (const turn of [1, 2]) {
+        const output = { system: [`turn ${turn}`] };
+
+        await on(hooks, "experimental.chat.system.transform")({ sessionID } as never, output);
+        expect(output.system).toEqual([`turn ${turn}`, GUIDANCE]);
+      }
+    }
+
+    expect(calls).toEqual([]);
+  });
+
+  it("supplies guidance without capturing or recalling subagent sessions", async () => {
     const { hooks, calls } = makeHooks();
 
     await on(hooks, "event")({ event: session("child", "parent") });
+    const output = { system: ["base prompt"] };
+
+    await on(hooks, "experimental.chat.system.transform")({ sessionID: "child" } as never, output);
+    expect(output.system).toEqual(["base prompt", GUIDANCE]);
     await on(hooks, "chat.message")({ sessionID: "child" } as never, {
       message: {} as never,
       parts: [{ type: "text", text: "subagent prompt" }] as never,

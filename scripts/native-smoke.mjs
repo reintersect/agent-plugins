@@ -191,7 +191,7 @@ const server = createServer(async (req, res) => {
           call_id: "call_fixture",
           arguments: JSON.stringify({
             cmd: "printf 'fixture native command\\n'",
-            yield_time_ms: 1000,
+            yield_time_ms: 10000,
           }),
         }
       : {
@@ -473,6 +473,20 @@ try {
       (call) => call.name === "RecallForCodingSession" && call.arguments.trigger === "compact",
     ),
   );
+  for (const route of ["/messages", "/responses"]) {
+    const bodies = requests
+      .filter((request) => request.path?.includes(route))
+      .map((request) => JSON.stringify(request.body));
+
+    assert(
+      bodies.some((body) => body.includes("plugin's reintersect skill")),
+      `${route}: search reminder missing`,
+    );
+    assert(
+      bodies.some((body) => body.includes("Consult Reintersect when prior team decisions")),
+      `${route}: automatic skill description missing`,
+    );
+  }
   for (const host of ["claude", "codex"]) {
     const directory = join(root, `${host}-agent`, "sessions");
     const records = readdirSync(directory)

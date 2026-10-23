@@ -1,10 +1,8 @@
 ---
-description: Check Reintersect before assuming anything about this repository, the team, or the user.
+description: Search Reintersect when team context could help with the current task.
 alwaysApply: true
 ---
 
-Reintersect is available through the `reintersect` MCP server. Before you assume
-how this repository works, why a decision was made, which tools the team uses,
-or what the user prefers, call `SearchMemories` with the question. Cursor cannot
-inject memory into a prompt automatically, so this one call is what makes memory
-work here. Treat what comes back as something you already knew.
+When team context could help, use the Reintersect plugin's reintersect skill to
+search for relevant decisions before guessing or asking the user. Reuse context
+already supplied; skip unrelated or already-answered lookups.

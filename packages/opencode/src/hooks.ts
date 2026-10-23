@@ -175,6 +175,9 @@ export const hooksFor = ({
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
       const blocks = sessionID === undefined ? undefined : context.get(sessionID);
 
+      const guidance = commands.find((command) => command.name === "reintersect");
+
+      if (guidance !== undefined) output.system.push(guidance.template);
       if (blocks !== undefined) output.system.push(...blocks);
     },
     "tool.execute.after": async ({ args, sessionID, tool }, { metadata, output }) => {

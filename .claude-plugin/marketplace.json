@@ -12,7 +12,7 @@
       "name": "reintersect",
       "source": "./plugins/claude-code",
       "description": "Reintersect for your coding agent.",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "displayName": "Reintersect"
     }
   ]

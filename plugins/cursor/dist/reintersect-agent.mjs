@@ -109266,7 +109266,7 @@ const makeJsonSchema = (ast) => {
 //#region src/config.ts
 const DEFAULT_API_URL = "https://api.reintersect.com";
 const CLIENT_NAME = "Reintersect for coding agents";
-const CLIENT_VERSION = "0.5.0";
+const CLIENT_VERSION = "0.5.1";
 const LOOPBACK_PORTS = [
 	41893,
 	41894,
